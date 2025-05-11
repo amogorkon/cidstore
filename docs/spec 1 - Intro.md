@@ -79,3 +79,15 @@ graph TD
 - **Key Immutability:** Once written, a key’s value set cannot be modified (only appended to).
 - **Bucket Load Factor:** Hash buckets resize when >75% full to maintain O(1) lookups.
 - **Value Set Sharding:** No group exceeds 1M keys to limit metadata overhead.
+
+## 1.8 Dependencies
+
+| Dependency       | Version   | Description                                                                 |
+|------------------|-----------|-----------------------------------------------------------------------------|
+| **Python**       | 3.12      | The minimum required version for compatibility with the latest language features. |
+| **HDF5**         | 1.14.6    | Provides scalable, chunked, and compressed storage for nodes and value datasets. |
+| **h5py**         | 3.13      | Python interface to the HDF5 library, enabling hierarchical data management in Python. |
+| **NumPy**        | 2.2.5    | Used for efficient data manipulation and defining structured data types.    |
+| **CRC32C**       | 2.7.1    | Used for checksum validation to ensure data integrity.                      |
+
+These dependencies are critical for achieving the performance targets and architectural goals outlined in this specification.

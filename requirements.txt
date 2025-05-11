@@ -1,0 +1,9 @@
+# Requirements for CIDTree
+
+# Python version
+python>=3.12
+
+# Libraries
+h5py==3.13
+numpy==2.2.5
+crc32c==2.7.1
