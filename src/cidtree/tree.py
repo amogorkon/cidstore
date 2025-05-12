@@ -1,13 +1,12 @@
 # tree.py
 
-import h5py
-import numpy as np
-from filelock import FileLock
-from typing import List, Union, Tuple
+from typing import List, Union
 
-from .config import VALUES_GROUP
+import h5py
+from filelock import FileLock
+
 from .keys import E
-from .node import Leaf, InternalNode
+from .node import InternalNode, Leaf
 from .storage import StorageManager
 from .wal import WAL
 
@@ -19,6 +18,101 @@ INTERNAL_MAX_KEYS = Leaf.CHUNK  # tune separately if desired
 
 
 class BPlusTree:
+    def _promote_multi_value_keys(self, leaf: Leaf) -> None:
+        # For now, do nothing (stub for multi-value promotion)
+        pass
+
+    def _split_leaf(self, leaf: Leaf) -> None:
+        # Split the leaf node and update parent/internal nodes as needed
+        new_path, sep = leaf.split()
+        # If root is a leaf, create a new root as internal node
+        if self.root.name == leaf.path:
+            # Create new internal node
+            idx = 0
+            while f"{INTERNAL_PREFIX}{idx}" in self.file:
+                idx += 1
+            internal_path = f"{INTERNAL_PREFIX}{idx}"
+            grp = self.file.create_group(internal_path)
+            internal = InternalNode(self.file, internal_path)
+            # Set up keys and children (always as bytes)
+            internal.keys_ds.resize((1,))
+            internal.keys_ds[0] = (sep.high, sep.low)
+            internal.children_ds.resize((2,))
+            internal.children_ds[0] = (
+                leaf.path.encode("utf-8") if isinstance(leaf.path, str) else leaf.path
+            )
+            internal.children_ds[1] = (
+                new_path.encode("utf-8") if isinstance(new_path, str) else new_path
+            )
+            self.root = grp
+            self.file.attrs[ROOT_ATTR] = internal_path
+        else:
+            # Find parent and insert separator key and new child pointer
+            self._insert_in_parent(leaf.path, sep, new_path)
+
+    def _insert_in_parent(self, old_child: str, sep: E, new_child: str) -> None:
+        # Always compare and store child paths as bytes
+        old_child_bytes = (
+            old_child.encode("utf-8") if isinstance(old_child, str) else old_child
+        )
+        new_child_bytes = (
+            new_child.encode("utf-8") if isinstance(new_child, str) else new_child
+        )
+        path = self.root.name
+        if path.startswith(LEAF_PREFIX):
+            return  # Should not happen
+        node = InternalNode(self.file, path)
+        while True:
+            ch = node.children_ds[:]
+            ch_bytes = [
+                c if isinstance(c, bytes) else str(c).encode("utf-8") for c in ch
+            ]
+            if old_child_bytes in ch_bytes:
+                idx = ch_bytes.index(old_child_bytes)
+                node.insert(sep, new_child)  # node.insert will encode as needed
+                if len(node.keys_ds) > INTERNAL_MAX_KEYS:
+                    self._split_internal(node)
+                return
+            # Descend to the correct child
+            idx = ch_bytes.index(old_child_bytes) if old_child_bytes in ch_bytes else -1
+            if idx == -1:
+                return  # Not found
+            next_child = ch[idx]
+            # Decode for path
+            if isinstance(next_child, bytes):
+                next_child_str = next_child.decode("utf-8").rstrip("\x00")
+            else:
+                next_child_str = str(next_child)
+            if next_child_str.startswith(LEAF_PREFIX):
+                return
+            node = InternalNode(self.file, next_child_str)
+
+    def _split_internal(self, node: InternalNode) -> None:
+        # Split the internal node and update parent as needed
+        new_path, sep = node.split()
+        if self.root.name == node.path:
+            # Create new root
+            idx = 0
+            while f"{INTERNAL_PREFIX}{idx}" in self.file:
+                idx += 1
+            internal_path = f"{INTERNAL_PREFIX}{idx}"
+            grp = self.file.create_group(internal_path)
+            internal = InternalNode(self.file, internal_path)
+            internal.keys_ds.resize((1,))
+            internal.keys_ds[0] = (sep.high, sep.low)
+            internal.children_ds.resize((2,))
+            internal.children_ds[0] = (
+                node.path.encode("utf-8") if isinstance(node.path, str) else node.path
+            )
+            internal.children_ds[1] = (
+                new_path.encode("utf-8") if isinstance(new_path, str) else new_path
+            )
+            self.root = grp
+            self.file.attrs[ROOT_ATTR] = internal_path
+        else:
+            # Find parent and insert separator key and new child pointer
+            self._insert_in_parent(node.path, sep, new_path)
+
     def __init__(self, storage: StorageManager):
         self.storage = storage
         storage.apply_insert = self.insert
@@ -42,10 +136,12 @@ class BPlusTree:
             leaf = self._find_leaf(key)
             leaf.insert(key, value)
 
+            from .wal import OpType
+
             txn_id = int(self.wal.ds.shape[0])
             rec = {
                 "txn_id": txn_id,
-                "op_type": WAL.OpType.INSERT.value,
+                "op_type": OpType.INSERT.value,
                 "key_high": key.high,
                 "key_low": key.low,
                 "value_high": value.high,
@@ -70,10 +166,12 @@ class BPlusTree:
             leaf = self._find_leaf(key)
             leaf.delete(key)
 
+            from .wal import OpType
+
             txn_id = int(self.wal.ds.shape[0])
             rec = {
                 "txn_id": txn_id,
-                "op_type": WAL.OpType.DELETE.value,
+                "op_type": OpType.DELETE.value,
                 "key_high": key.high,
                 "key_low": key.low,
                 "value_high": 0,
@@ -95,7 +193,9 @@ class BPlusTree:
             node = InternalNode(self.file, child)
 
     def _create_root(self) -> h5py.Group:
-        leaf0 = f"{LEAF_PREFIX}0"
-        if leaf0 not in self.file:
-            self.file.create_group(leaf0)
+        leaf = f"{LEAF_PREFIX}0"
+        if leaf not in self.file:
+            grp = self.file.create_group(leaf)
             Leaf(self.file, leaf)
+            return grp
+        return self.file[leaf]

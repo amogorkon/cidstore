@@ -51,6 +51,10 @@ class Leaf(Node):
         self.ds: h5py.Dataset = self.group["entries"]
 
     def insert(self, key: E, value: E) -> None:
+        # Assert that neither key nor value is E(0)
+        assert int(key) > 0, f"Attempted to insert key E(0): {key}"
+        assert int(value) > 0, f"Attempted to insert value E(0): {value}"
+        # Multi-value: do not mark previous entries as deleted, just append
         arr = np.zeros(1, dtype=self.DTYPE)
         arr[0] = (key.high, key.low, value.high, value.low, 0)
         self.ds.resize((len(self.ds) + 1,))
@@ -60,7 +64,19 @@ class Leaf(Node):
         return len(self.ds) > self.CHUNK
 
     def lookup(self, key: E) -> List[E]:
+        assert int(key) > 0, f"Attempted to lookup key E(0): {key}"
+        # Multi-value: collect all non-deleted values for this key, unless a tombstone is present
         out: List[E] = []
+        deleted = False
+        # Scan in reverse to check for a tombstone (deleted entry)
+        for row in reversed(self.ds):
+            if int(row["key_high"]) == key.high and int(row["key_low"]) == key.low:
+                if row["deleted"] == 1:
+                    deleted = True
+                    break
+        if deleted:
+            return []
+        # Otherwise, collect all non-deleted values for this key
         for row in self.ds:
             if (
                 row["deleted"] == 0
@@ -69,21 +85,35 @@ class Leaf(Node):
             ):
                 hi = int(row["value_high"])
                 lo = int(row["value_low"])
-                out.append(E((hi << 64) | lo))
+                val = E((hi << 64) | lo)
+                assert int(val) > 0, f"lookup returned E(0) for key {key}"
+                out.append(val)
         return out
 
     def delete(self, key: E) -> None:
-        for i, row in enumerate(self.ds):
-            if (
-                row["deleted"] == 0
-                and int(row["key_high"]) == key.high
-                and int(row["key_low"]) == key.low
-            ):
-                self.ds[i]["deleted"] = 1
+        # Multi-value: append a tombstone entry for this key (do not mark previous as deleted)
+        arr = np.zeros(1, dtype=self.DTYPE)
+        arr[0] = (key.high, key.low, 0, 0, 1)
+        self.ds.resize((len(self.ds) + 1,))
+        self.ds[-1] = arr[0]
 
     def split(self) -> Tuple[str, E]:
         total = len(self.ds)
+        if total == 0:
+            raise RuntimeError("Cannot split empty leaf")
+        # Find a pivot that does not split entries for the same key
         pivot = total // 2
+        # Get the key at the pivot
+        pivot_key = (int(self.ds[pivot]["key_high"]), int(self.ds[pivot]["key_low"]))
+        # Move pivot forward until the key changes, unless at the end
+        while pivot < total - 1:
+            next_key = (
+                int(self.ds[pivot + 1]["key_high"]),
+                int(self.ds[pivot + 1]["key_low"]),
+            )
+            if next_key != pivot_key:
+                break
+            pivot += 1
         base = self.path
         idx = 0
         while f"{base}{idx}" in self.file:
@@ -92,12 +122,12 @@ class Leaf(Node):
         new_group = self.file.create_group(new_path)
         new_group.create_dataset(
             "entries",
-            data=self.ds[pivot:],
+            data=self.ds[pivot + 1 :],
             maxshape=(None,),
             dtype=self.DTYPE,
             chunks=True,
         )
-        self.ds.resize((pivot,))
+        self.ds.resize((pivot + 1,))
         # separator is first key of new leaf
         first = new_group["entries"][0]
         sep = E((int(first["key_high"]) << 64) | int(first["key_low"]))
@@ -124,7 +154,8 @@ class InternalNode(Node):
                 chunks=True,
             )
         if "children" not in self.group:
-            dt = h5py.string_dtype(encoding="utf-8")
+            # Use fixed-size byte string to avoid VLEN string errors
+            dt = np.dtype("S256")
             self.group.create_dataset(
                 "children", shape=(1,), maxshape=(None,), dtype=dt
             )
@@ -134,7 +165,11 @@ class InternalNode(Node):
     def find_child(self, key: E) -> str:
         highs = self.keys_ds[:]["key_high"]
         idx = np.searchsorted(highs, key.high, side="right")
-        return self.children_ds[idx]
+        # Decode bytes to str if needed
+        child = self.children_ds[idx]
+        if isinstance(child, bytes):
+            return child.decode("utf-8").rstrip("\x00")
+        return str(child)
 
     def insert(self, sep_key: E, new_child: str) -> None:
         highs = self.keys_ds[:]["key_high"].tolist()
@@ -147,8 +182,15 @@ class InternalNode(Node):
         for i, (h, l) in enumerate(zip(highs, lows)):
             self.keys_ds[i] = (h, l)
         # rewrite children
-        ch = self.children_ds[:].tolist()
-        ch.insert(idx + 1, new_child)
+        ch = [
+            c if isinstance(c, bytes) else str(c).encode("utf-8")
+            for c in self.children_ds[:]
+        ]
+        # Always encode new_child as bytes
+        new_child_bytes = (
+            new_child.encode("utf-8") if isinstance(new_child, str) else new_child
+        )
+        ch.insert(idx + 1, new_child_bytes)
         self.children_ds.resize((len(ch),))
         self.children_ds[:] = ch
 
@@ -167,8 +209,11 @@ class InternalNode(Node):
         right_keys = self.keys_ds[mid + 1 :]
         new_node.keys_ds.resize((len(right_keys),))
         new_node.keys_ds[:] = right_keys
-        # move right-side children
-        ch = self.children_ds[:].tolist()
+        # move right-side children, always as bytes
+        ch = [
+            c if isinstance(c, bytes) else str(c).encode("utf-8")
+            for c in self.children_ds[:]
+        ]
         right_ch = ch[mid + 1 :]
         new_node.children_ds.resize((len(right_ch),))
         new_node.children_ds[:] = right_ch

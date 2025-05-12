@@ -16,6 +16,9 @@ def in_memory_hdf5():
 @pytest.fixture
 def tree(monkeypatch, in_memory_hdf5):
     class InMemoryStorageManager(StorageManager):
+        def __init__(self):
+            # Provide a dummy path to satisfy the base class
+            super().__init__(path="dummy")
         def open(self, mode="a", swmr=False):
             self.file = in_memory_hdf5
             return self.file

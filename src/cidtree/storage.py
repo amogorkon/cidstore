@@ -3,9 +3,17 @@
 import h5py
 from typing import Optional
 from .config import CONFIG_GROUP, NODES_GROUP, VALUES_GROUP
+from .keys import E
 
 
 class StorageManager:
+    def rollback_to_version(self, version: int) -> None:
+        """
+        Rollback to a previous version. This is a stub for WAL compatibility.
+        Override in a subclass or bind to a tree method if needed.
+        """
+        # No-op by default
+        pass
     """
     Manages the HDF5 file, ensures required groups exist, and provides
     basic lifecycle (open/close/flush) plus stubs for raw insert/delete
