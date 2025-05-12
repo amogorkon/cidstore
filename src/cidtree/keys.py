@@ -63,7 +63,7 @@ class E(int):
 
     def __str__(self) -> str:
         hex_str = hex(self)
-        return f"E({hex_str})"
+        return f"E({hex_str[2:9]}..)" if len(hex_str) > 8 else f"E({hex_str[2:]})"
 
     def to_hdf5(self) -> NDArray[np.void]:
         """Convert to HDF5-compatible array"""
@@ -141,14 +141,15 @@ def create_composite_key(a: E, b: E) -> E:
     4. **Assembly:**
        Composite key = (final_high << 64) | final_low
     """
-    h = enhanced_mix(a.high ^ b.low) ^ PERTURB_HIGH
-    L = enhanced_mix(a.low ^ b.high) ^ PERTURB_LOW
+    high = enhanced_mix(a.high ^ b.low) ^ PERTURB_HIGH
+    low = enhanced_mix(a.low ^ b.high) ^ PERTURB_LOW
 
-    rotated_h = rot64(h, 19) ^ (L & MASK_EVEN)
-    rotated_L = rot64(L, 23) ^ (h & MASK_ODD)
+    # Rotate and mix further to break commutativity and incorporate bit masks.
+    rotated_high = rot64(high, 19) ^ (low & MASK_EVEN)
+    rotated_low = rot64(low, 23) ^ (high & MASK_ODD)
 
-    final_high = enhanced_mix(rotated_h ^ rotated_L)
-    final_low = enhanced_mix(rotated_L ^ rotated_h)
+    final_high = enhanced_mix(rotated_high ^ rotated_low)
+    final_low = enhanced_mix(rotated_low ^ rotated_high)
 
     composite_value = (final_high << 64) | final_low
     return E(composite_value)
