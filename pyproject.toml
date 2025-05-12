@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cidtree"
+version = "0.1.0"
+description = "A high-performance, disk-backed B+Tree implementation for triplestores only working with CIDs."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Anselm Kiefner", email = "cidtree-github@anselm.kiefner.de" }
+]
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+
+[project.urls]
+Homepage = "https://github.com/amogorkon/cidtree"
+
+[tool.setuptools]
+packages = { find = { where = ["src"] } }
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc"]
+
+[tool.mypy]
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[tool.ruff]
+target-version = "py312"
