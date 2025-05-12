@@ -4,14 +4,14 @@ from cidtree.storage import StorageManager
 
 def test_storage_manager_in_memory(in_memory_hdf5):
     # Use our StorageManager with the in-memory HDF5 file
-    storage = StorageManager()
+    storage = StorageManager(path=":memory:")
     storage.file = in_memory_hdf5
     # Ensure required groups/datasets are created
-    storage._ensure_groups()
+    storage._ensure_core_groups()
     # Check that config, nodes, values groups exist
     from cidtree.config import NODES_GROUP, WAL_DATASET
-
-    # Check that WAL dataset exists
+    from cidtree.wal import WAL
+    WAL(storage)  # Ensure WAL dataset is created
     assert WAL_DATASET in storage.file
     # Write/read to a dataset in one of the groups
     nodes_group = storage.file[NODES_GROUP]

@@ -1,25 +1,26 @@
 # Node structure tests for CIDTree
-import numpy as np
 
-from cidtree.node import InternalNode, Leaf, internal_key_dtype, leaf_dtype
+from cidtree.node import InternalNode, Leaf
+from cidtree.keys import E
 
 
-def test_leaf_node_structure():
-    arr = np.zeros(2, dtype=leaf_dtype)
-    arr[0]["key_high"] = 1
-    arr[0]["key_low"] = 2
-    arr[0]["prev"] = b"0" * 32
-    arr[0]["next"] = b"1" * 32
-    node = Leaf(arr)
-    assert node.ds.shape == (2,)
+def test_leaf_node_structure(tmp_path):
+    import h5py
+    h5file = h5py.File(tmp_path / "test_leaf.h5", "w")
+    node = Leaf(h5file, "/leaf0")
+    node.insert(E(1 << 64), E(2 << 64))
+    assert node.ds.shape == (1,)
     assert node.ds[0]["key_high"] == 1
-    assert node.ds[0]["prev"] == b"0" * 32
+    h5file.close()
 
 
-def test_internal_node_structure():
-    arr = np.zeros(2, dtype=internal_key_dtype)
-    arr[0]["key_high"] = 1
-    arr[0]["child"] = b"a" * 32
-    node = InternalNode(arr)
-    assert node.ds.shape == (2,)
-    assert node.ds[0]["child"] == b"a" * 32
+def test_internal_node_structure(tmp_path):
+    import h5py
+    h5file = h5py.File(tmp_path / "test_internal.h5", "w")
+    node = InternalNode(h5file, "/internal0")
+    # Insert a key and a child
+    node.insert(E(1 << 64), "/leaf0")
+    assert node.keys_ds.shape == (1,)
+    assert node.keys_ds[0]["key_high"] == 1
+    assert node.children_ds[1].decode() == "/leaf0"
+    h5file.close()
