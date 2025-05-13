@@ -1,11 +1,12 @@
 # Node structure tests for CIDTree
 
-from cidtree.node import InternalNode, Leaf
 from cidtree.keys import E
+from cidtree.node import InternalNode, Leaf
 
 
 def test_leaf_node_structure(tmp_path):
     import h5py
+
     h5file = h5py.File(tmp_path / "test_leaf.h5", "w")
     node = Leaf(h5file, "/leaf0")
     node.insert(E(1 << 64), E(2 << 64))
@@ -16,6 +17,7 @@ def test_leaf_node_structure(tmp_path):
 
 def test_internal_node_structure(tmp_path):
     import h5py
+
     h5file = h5py.File(tmp_path / "test_internal.h5", "w")
     node = InternalNode(h5file, "/internal0")
     # Insert a key and a child

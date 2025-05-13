@@ -100,6 +100,7 @@ def test_insert_and_lookup(tree, key, value):
 
 def test_overwrite(tree):
     from cidtree.keys import E
+
     tree.insert("dup", 1)
     tree.insert("dup", 2)
     result = list(tree.lookup("dup"))

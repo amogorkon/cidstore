@@ -22,7 +22,6 @@ def test_standard_workflow(tmp_path):
     assert list(tree.lookup(k_alpha)) == [E(1)]
     assert list(tree.lookup(k_beta)) == [E(2)]
 
-
     # 4. Multi-value key: insert same key many times
     k_multi = E.from_str("multi")
     for i in range(1, 151):
@@ -104,7 +103,7 @@ def test_concurrent_writes(tmp_path):
     for k, vals in results:
         # The inserted value is always E(i), so just check E(i) is present
         # k is E.from_str(f"key{i}") and value is E(i)
-        i = int(str(k)[str(k).find('key')+3:]) if 'key' in str(k) else None
+        i = int(str(k)[str(k).find("key") + 3 :]) if "key" in str(k) else None
         if i is not None:
             assert E(i) in vals
 

@@ -11,6 +11,7 @@ def test_storage_manager_in_memory(in_memory_hdf5):
     # Check that config, nodes, values groups exist
     from cidtree.config import NODES_GROUP, WAL_DATASET
     from cidtree.wal import WAL
+
     WAL(storage)  # Ensure WAL dataset is created
     assert WAL_DATASET in storage.file
     # Write/read to a dataset in one of the groups
