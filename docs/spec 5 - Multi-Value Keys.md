@@ -38,17 +38,17 @@ def promote_multi_value_keys(node):
 
 
 ### 1.1 Composite Keys
-The details on how exactly pairs of keys are composed into **composite keys** while respecting order and semantics are covered in the Composite Key Architecture spec of the triplestore and will not be of concern for the B+Tree implementation. At this point, we will assume that basic and composite keys are already created and are passed as 128-bit integers and behave exactly the same. The B+Tree will not be aware of the difference between a basic key and a composite key and is only concerned with storing and retrieving the values associated with the keys as compactly and efficiently as possible.
+The details on how exactly pairs of keys are composed into **composite keys** while respecting order and semantics are covered in the Composite Key Architecture spec of the triplestore and will not be of concern for the B+Tree implementation. At this point, we will assume that basic and composite keys are already created and are passed as 128-bit integers and behave exactly the same. The B+Tree will not be aware of the difference between a basic key and a composite key and is only concerned with storing and retrieving the values associated with the keys as compactly and efficiently as possible. A composite key behaves and acts for all intents and purposes as a basic key, and the B+Tree will not be aware of the difference. The B+Tree will not be aware of the difference between a basic key and a composite key and is only concerned with storing and retrieving the values associated with the keys as compactly and efficiently as possible.
 
 ## 2. Approach 1: Duplicate Keys in B+Tree
 
 ### 2.1 Structure
-Leaf Node Entries: Allow multiple entries with the same composite key, each storing a UUID.
+Leaf Node Entries: Allow multiple entries with the same key, each storing a CID.
 
 ### 2.2 Operations
 #### Insertion
 Locate the leaf node for the key.
-Append a new entry with the key and object UUID.
+Append a new entry with the key and object CID.
 Split the leaf node if it exceeds the order limit.
 
 #### Query
@@ -84,7 +84,7 @@ BPlusTreeEntry = {
 }
 ```
 
-Value Dataset: Stores object UUIDs in contiguous chunks.
+Value Dataset: Stores object CIDs in contiguous chunks.
 
 ```python
 /values/sp/A_loves: [(o1_high, o1_low), (o2_high, o2_low), ...]
@@ -93,14 +93,14 @@ Value Dataset: Stores object UUIDs in contiguous chunks.
 ### 3.2 Operations
 #### Insertion
 Insert/update the composite key to point to its value dataset.
-Append the new object UUID to the linked dataset.
+Append the new object CID to the linked dataset.
 
 #### Query
 Retrieve the dataset path from the B+Tree.
 Load the entire dataset into memory in one read operation.
 
 #### Deletion
-Remove the object UUID from the linked dataset.
+Remove the object CID from the linked dataset.
 Delete the composite key if no values remain.
 
 ### 3.3 HDF5 Integration

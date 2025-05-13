@@ -10,7 +10,7 @@ All nodes (leaf and internal) follow a shared abstraction with clearly defined p
 |----------------|------------------|-------------|
 | `Key[]`        | `keys`           | 128-bit entries; semantic in leaves, synthetic in internal nodes |
 | `Pointer[]`    | `children`       | Only present in internal nodes; one more than the number of keys |
-| `Value[]`      | `values`         | Only present in leaf nodes; UUID128 payloads |
+| `Value[]`      | `values`         | Only present in leaf nodes; CID payloads |
 | `Link`         | `prev`, `next`   | Present only in leaf nodes; fixed-size binary pointers to neighboring leaves |
 
 
@@ -78,7 +78,7 @@ Maintain an attribute or parallel dataset that holds an array of these pointers.
 ## 3.3 Dataset Paths
 - **Node dataset paths:** Deterministically generated via a function:
   ```python
-  def get_node_path(cid: UUID128, node_type: str) -> str:
+  def get_node_path(cid: CID, node_type: str) -> str:
       hex_key = f"{cid.high:016x}{cid.low:016x}"
       prefix = hex_key[:2]
       return f"/sp/nodes/{node_type}/{prefix}/{hex_key}"
@@ -204,7 +204,7 @@ This separation makes it easier to update each part atomically during node opera
 ### 3.3 Dataset Paths
 - **Node dataset paths:** Deterministically generated via a function:
   ```python
-  def get_node_path(cid: UUID128, node_type: str) -> str:
+  def get_node_path(cid: CID, node_type: str) -> str:
       hex_key = f"{cid.high:016x}{cid.low:016x}"
       prefix = hex_key[:2]
       return f"/sp/nodes/{node_type}/{prefix}/{hex_key}"

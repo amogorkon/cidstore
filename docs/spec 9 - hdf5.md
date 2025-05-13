@@ -11,5 +11,5 @@ root/
   │   └── 5678: Dataset    # Leaf node (keys, values, prev, next)
   └── values/
       └── sp/             # External value-list datasets for promoted multi-value keys
-          └── A_loves: Dataset  # Contains list of UUIDs
+          └── A_loves: Dataset  # Contains list of CIDs
 ```
