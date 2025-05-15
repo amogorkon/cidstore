@@ -1,6 +1,5 @@
 """keys.py - Entity (E) logic and key utilities for CIDTree"""
 
-
 from __future__ import annotations
 
 from uuid import NAMESPACE_DNS, uuid4, uuid5
@@ -8,12 +7,9 @@ from uuid import NAMESPACE_DNS, uuid4, uuid5
 import numpy as np
 from numpy.typing import NDArray
 
-_kv_store: dict[
-    int, str
-] = {}
+_kv_store: dict[int, str] = {}
 
 KEY_DTYPE = np.dtype([("high", "<u8"), ("low", "<u8")])
-
 
 
 class E(int):

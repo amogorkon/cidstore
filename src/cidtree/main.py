@@ -1,11 +1,8 @@
 """main.py - Example usage and entry point for CIDTree"""
 
-
-
 from .config import HDF5_FILE
 from .storage import StorageManager
 from .tree import CIDTree
-
 
 if __name__ == "__main__":
     storage = StorageManager(HDF5_FILE)

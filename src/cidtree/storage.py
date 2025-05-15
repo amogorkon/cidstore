@@ -1,4 +1,5 @@
 """storage.py - HDF5 storage manager and raw hooks for CIDTree"""
+
 """storage.py - HDF5 storage manager and raw hooks for CIDTree"""
 
 from typing import Optional
@@ -16,8 +17,6 @@ class StorageManager:
         Override in a subclass or bind to a tree method if needed.
         """
         pass
-
-
 
     def __init__(self, path: str):
         self.path: str = path

@@ -1,4 +1,5 @@
 """tree.py - Main CIDTree class, directory, bucket, and ValueSet logic (Spec 2)"""
+
 """tree.py - Main CIDTree class, directory, bucket, and ValueSet logic (Spec 2)"""
 
 import io
@@ -8,7 +9,6 @@ import h5py
 from .keys import E
 from .storage import StorageManager
 from .wal import WAL
-
 
 
 class CIDTree:

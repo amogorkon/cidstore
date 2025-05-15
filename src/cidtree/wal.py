@@ -1,9 +1,7 @@
 """wal.py - Write-ahead log and recovery logic for CIDTree"""
 
-
 import hashlib
 import hmac
-import logging
 import os
 import struct
 from enum import Enum
@@ -16,8 +14,6 @@ from filelock import FileLock
 from .config import WAL_DATASET, WAL_METADATA_GROUP
 from .keys import E
 from .storage import StorageManager
-
-
 
 
 class OpType(Enum):
