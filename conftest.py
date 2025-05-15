@@ -1,28 +1,27 @@
-import h5py
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'src'))
+
+import io
 import pytest
-
-from cidtree.storage import StorageManager
-from cidtree.tree import BPlusTree
-
+import h5py
+from cidtree.tree import CIDTree
 
 @pytest.fixture
-def in_memory_hdf5():
-    # Use the HDF5 core driver for in-memory operation
-    f = h5py.File("dummy", "w", driver="core", backing_store=False)
-    yield f
-    f.close()
-
+def tree():
+    # Use an in-memory HDF5 file via BytesIO
+    f = io.BytesIO()
+    # Pre-create a valid HDF5 file structure
+    with h5py.File(f, 'w') as hf:
+        hf.create_group('buckets')
+    f.seek(0)
+    return CIDTree(f)
 
 @pytest.fixture
-def tree(monkeypatch, in_memory_hdf5):
-    class InMemoryStorageManager(StorageManager):
-        def __init__(self):
-            # Provide a dummy path to satisfy the base class
-            super().__init__(path="dummy")
+def directory(tree):
+    return tree
 
-        def open(self, mode="a", swmr=False):
-            self.file = in_memory_hdf5
-            return self.file
-
-    storage = InMemoryStorageManager()
-    return BPlusTree(storage)
+@pytest.fixture
+def bucket(tree):
+    return tree

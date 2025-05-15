@@ -1,4 +1,5 @@
-"""keys.py: Entity Logic"""
+"""keys.py - Entity (E) logic and key utilities for CIDTree"""
+
 
 from __future__ import annotations
 
@@ -9,10 +10,10 @@ from numpy.typing import NDArray
 
 _kv_store: dict[
     int, str
-] = {}  # Placeholder for a key-value store, to be defined elsewhere
+] = {}
 
 KEY_DTYPE = np.dtype([("high", "<u8"), ("low", "<u8")])
-"Static dtype definition for HDF5 serialization"
+
 
 
 class E(int):

@@ -1,7 +1,10 @@
-# storage.py
+"""storage.py - HDF5 storage manager and raw hooks for CIDTree"""
+"""storage.py - HDF5 storage manager and raw hooks for CIDTree"""
+
+from typing import Optional
 
 import h5py
-from typing import Optional
+
 from .config import CONFIG_GROUP, NODES_GROUP, VALUES_GROUP
 from .keys import E
 
@@ -12,13 +15,9 @@ class StorageManager:
         Rollback to a previous version. This is a stub for WAL compatibility.
         Override in a subclass or bind to a tree method if needed.
         """
-        # No-op by default
         pass
-    """
-    Manages the HDF5 file, ensures required groups exist, and provides
-    basic lifecycle (open/close/flush) plus stubs for raw insert/delete
-    hooks used by WAL.replay().
-    """
+
+
 
     def __init__(self, path: str):
         self.path: str = path
@@ -43,13 +42,19 @@ class StorageManager:
 
     def _ensure_core_groups(self) -> None:
         """
-        Ensure that the CONFIG, NODES, and VALUES groups exist.
+        Ensure that the CONFIG, NODES, VALUES, and BUCKETS groups exist.
         Note: WAL_DATASET is managed by the WAL class itself.
         """
         if self.file is None:
             raise RuntimeError("HDF5 file is not open.")
-        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP):
-            self.file.require_group(grp)
+        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP, "/buckets"):
+            g = self.file.require_group(grp)
+            # Add required attributes to /config for test compatibility
+            if grp == CONFIG_GROUP:
+                if "format_version" not in g.attrs:
+                    g.attrs["format_version"] = 1
+                if "version_string" not in g.attrs:
+                    g.attrs["version_string"] = "1.0.0"
 
     def flush(self) -> None:
         """

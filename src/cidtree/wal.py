@@ -1,4 +1,4 @@
-"""wal.py"""
+"""wal.py - Write-ahead log and recovery logic for CIDTree"""
 
 
 import hashlib
@@ -7,7 +7,7 @@ import logging
 import os
 import struct
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 import h5py
 import numpy as np
@@ -17,29 +17,7 @@ from .config import WAL_DATASET, WAL_METADATA_GROUP
 from .keys import E
 from .storage import StorageManager
 
-# Set up a logger for WAL operations.
-logger = logging.getLogger(__name__)
 
-# Constant for a null HMAC value.
-NULL_HMAC = b"\x00" * 32
-
-# Enforce maximum transaction record count.
-MAX_TXN_RECORDS = 1000
-
-# Hardcoded HMAC secret for internal WAL usage.
-HARDCODED_WAL_SECRET = b"0123456789abcdef0123456789abcdef"  # 32 bytes
-
-# Structured dtype with HMAC-SHA256 for tamper detection.
-wal_dtype = np.dtype([
-    ("txn_id", "<u8"),  # Transaction ID (monotonically increasing)
-    ("op_type", "u1"),  # Operation type from OpType enum
-    ("key_high", "<u8"),  # High 64 bits of E key
-    ("key_low", "<u8"),  # Low 64 bits of E key
-    ("value_high", "<u8"),  # High 64 bits of E value
-    ("value_low", "<u8"),  # Low 64 bits of E value
-    ("hmac", "|V32"),  # HMAC-SHA256 for integrity verification (fixed-size 32 bytes)
-    ("prev_hmac", "|V32"),  # Chain to previous record (fixed-size 32 bytes)
-])
 
 
 class OpType(Enum):
@@ -74,17 +52,23 @@ class WAL:
         if hasattr(storage, "file") and storage.file is not None:
             self.file: h5py.File = storage.file
         else:
-            self.file: h5py.File = h5py.File(storage.path, "a", libver="latest", swmr=True)
+            self.file: h5py.File = h5py.File(
+                storage.path, "a", libver="latest", swmr=True
+            )
         self._init_datasets()
         self.hmac_key: bytes = self._get_hmac_key()
         # Use atomic counter from metadata for transaction ID monotonicity.
-        self.last_txn_id: int = self.file[WAL_METADATA_GROUP].attrs.get("last_txn_id", 0)
+        self.last_txn_id: int = self.file[WAL_METADATA_GROUP].attrs.get(
+            "last_txn_id", 0
+        )
         self.next_txn_id: int = self.last_txn_id + 1
         self.file[WAL_METADATA_GROUP].attrs.modify("last_txn_id", self.next_txn_id)
         # Watermark tracking for WAL record count.
         self.watermark: int = self.file[WAL_METADATA_GROUP].attrs.get("watermark", 0)
         # Support HMAC test mode via environment variable.
-        self.disable_hmac: bool = os.getenv("WAL_DISABLE_HMAC", "false").lower() == "true"
+        self.disable_hmac: bool = (
+            os.getenv("WAL_DISABLE_HMAC", "false").lower() == "true"
+        )
         logger.info(f"WAL initialized (disable_hmac={self.disable_hmac}).")
 
     def _init_datasets(self) -> None:
@@ -109,7 +93,11 @@ class WAL:
             data = bytes(hmac_salt)
         # Store checksum as fixed-size bytes, not VLEN string
         if "metadata_checksum" not in meta.attrs:
-            meta.attrs.modify("metadata_checksum", np.void(hashlib.sha3_256(data).digest())) if "metadata_checksum" in meta.attrs else meta.attrs.create("metadata_checksum", np.void(hashlib.sha3_256(data).digest()))
+            meta.attrs.modify(
+                "metadata_checksum", np.void(hashlib.sha3_256(data).digest())
+            ) if "metadata_checksum" in meta.attrs else meta.attrs.create(
+                "metadata_checksum", np.void(hashlib.sha3_256(data).digest())
+            )
 
         if WAL_DATASET not in self.file:
             ds = self.file.create_dataset(
@@ -144,9 +132,9 @@ class WAL:
             elif isinstance(salt, bytes):
                 salt_bytes = salt
             else:
-                salt_bytes = bytes(salt) if hasattr(salt, '__bytes__') else b''
+                salt_bytes = bytes(salt) if hasattr(salt, "__bytes__") else b""
         except Exception:
-            salt_bytes = b''
+            salt_bytes = b""
         return hashlib.pbkdf2_hmac("sha256", HARDCODED_WAL_SECRET, salt_bytes, 100000)
 
     def _compute_hmac(self, record: np.void, prev_hmac: bytes) -> bytes:
@@ -326,7 +314,7 @@ class WAL:
         with self.lock:
             if self.ds.shape[0] == 0:
                 return
-            rng = np.random.default_rng(int.from_bytes(os.urandom(8), 'little'))
+            rng = np.random.default_rng(int.from_bytes(os.urandom(8), "little"))
             indices = rng.choice(self.ds.shape[0], size=sample_size, replace=True)
             for i in indices:
                 rec = self.ds[i]
