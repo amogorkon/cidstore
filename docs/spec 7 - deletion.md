@@ -1,49 +1,68 @@
-## 7. Deletion
+# 7. Deletion
 
-### 7.1 Underfilled Nodes
-- **Defined merge/redistribute policy:** Nodes below ⌈order/2⌉ will borrow or merge.
+```mermaid
 
-### 7.2 Value-List Cleanup
-- **Background GC:** Periodically scans for and removes empty value-list datasets; deletions are logged via the WAL.
+> **Note:** For canonical data structure diagrams, see [Spec 2: Data Types and Structure](spec%202%20-%20Data%20Types%20and%20Structure.md#data-structure).
 
-### 7.3 Deletion Log vs WAL
-The deletion log and the WAL serve distinct but complementary roles in managing internal node deletions and ensuring system consistency:
+## 7.1 Underfilled Buckets
 
-**1. Roles and Responsibilities**
-- **WAL:** Used for transactional changes like node splits, merges, inserts, and updates. Ensures atomic and recoverable tree operations.
-- **Deletion Log:** Tracks nodes marked for cleanup, allowing deferred deletion during background processing. It’s not replayed for recovery.
+| Condition                | Action                                 |
+|--------------------------|----------------------------------------|
+| Bucket < load_factor_min | Redistribute or merge with neighbor(s) |
 
-**3. Benefits**
-- **Separation of Concerns:** WAL ensures transactional recovery; deletion log handles deferred GC.
-- **Efficiency:** Enables batch deletions and avoids WAL bloat.
-- **Safety:** Background GC may validate deletion candidates before purging.
+Buckets below threshold are merged or redistributed for efficiency.
 
-### Key Count Tracking for Internal Nodes
+## 7.2 Value-List Cleanup
 
-**Purpose:**
-Key counts validate internal node structure, enforce occupancy limits, and facilitate splits, merges, and rebalancing.
+| Task                | Mechanism                  |
+|---------------------|---------------------------|
+| Remove empty lists  | Background GC process      |
+| Log deletions       | Dedicated deletion log     |
 
-**Approach:**
-- **No Persistent Storage:** Key counts are not stored on-disk; they are maintained in an in-memory table to keep HDF5 files compact.
-- **In-Memory Table:**
-  ```python
-  in_memory_table = {
-      "/sp/nodes/internal/1234": {"key_count": 50},
-      "/sp/nodes/internal/5678": {"key_count": 40},
-  }
-  ```
-- **Lifecycle Management:**
-  - **Initialization:** When a node is loaded, compute its key count from the keys dataset and store it in the table.\n  - **Updates:** Increment/decrement counts as keys are added or removed during operations.\n  - **Cleanup:** Remove entries when nodes are unloaded.
-- **Overflow Handling:** Use the in-memory key count to decide on splits or merges and support dynamic thresholds if needed.
+GC scans and removes empty value-lists, logging deletions for safe reclamation.
 
-**Benefits:**
-- **Efficiency:** Avoids repeated key count computations.\n  - **Compact Storage:** HDF5 structure remains lightweight.\n  - **Scalability:** Facilitates dynamic per-node threshold adjustments.
+## 7.3 Deletion Log vs. WAL
 
-###  Underfilled Nodes
-- Nodes with fewer than ⌈order/2⌉ keys trigger key redistribution from siblings or merge if redistribution isn’t feasible.
+| Log Type   | Purpose                                      |
+|------------|----------------------------------------------|
+| WAL        | Captures all transactional ops for recovery  |
+| Deletion   | Tracks entries/datasets for background GC    |
 
-###  Value-List Cleanup
-- A background process scans for empty external value-list datasets and reclaims their storage.
+Deletion log records removals; GC scans log to reclaim space and clean up orphans.
 
-###  Deletion Log vs. WAL
-- **WAL:** Captures all transactional operations for recovery.\n  - **Deletion Log:** Separately records nodes marked as obsolete, which are later processed by background garbage collection to remove unneeded datasets.
+### Deletion & GC Workflow
+
+```mermaid
+flowchart TD
+    A[Delete entry or value-list] --> B[Log deletion]
+    B --> C[GC scans log]
+    C --> D{Still referenced?}
+    D -- Yes --> E[Do nothing]
+    D -- No --> F[Remove dataset]
+    F --> G[Reclaim space]
+```
+
+| Step                | Description                                 |
+|---------------------|---------------------------------------------|
+| Log Deletion        | Every deletion is logged with key, ID, time |
+| Orphan Detection    | GC cross-checks log with current metadata   |
+| Orphan Reclamation  | Orphaned datasets are deleted, space freed  |
+| Full-File Scan      | Periodic scan to catch missed orphans       |
+
+**Concurrency & Consistency:**
+- Deletions/promotions are serialized with the global writer lock (HDF5 SWMR)
+- Prevents races between insert/promote and GC
+
+**Crash Recovery:**
+- WAL and deletion log are replayed on startup; incomplete GC is retried
+
+**Idempotence & Safety:**
+- GC is idempotent; missed/partial deletions retried in next cycle
+- Full scans ensure eventual cleanup
+- WAL replay ensures metadata, deletion log, and disk state are consistent
+
+| Factor      | Consideration                                 |
+|------------ |----------------------------------------------|
+| Performance | Frequent GC adds overhead but ensures cleanup |
+| Safety      | Full scans/idempotence prevent orphans        |
+| Degradation | Temporary discrepancies tolerated             |

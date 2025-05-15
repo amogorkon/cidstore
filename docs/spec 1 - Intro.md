@@ -1,57 +1,27 @@
 # 1. Introduction
 
-## 1.1 Core Purpose
-**Objective:** Provide a disk-backed, concurrent hash directory for mapping 128-bit keys (split into two 64-bit integers) to variable-sized sets of 128-bit values, optimized for:
+| Feature                | Target/Description                       |
+|------------------------|------------------------------------------|
+| Scale                  | 1B keys, 100B values                     |
+| Insert Throughput      | >1M ops/sec (batched)                    |
+| Lookup Latency         | <50μs (avg), <100μs (P99)                |
+| Recovery Time          | <30s after crash                         |
+| Concurrency            | SWMR: 1 writer, many readers             |
+| Range Queries          | Not supported                            |
+| Transaction Isolation  | Eventual consistency for readers         |
 
-- Massive-scale many-to-many relationships (e.g., key → {value₁, value₂, ...}).
-- High insert throughput (>1M ops/sec sustained).
-- Low-latency exact key lookups (P99 < 100µs).
-- Crash consistency with minimal recovery time.
+**Key Points:**
+- Disk-backed, concurrent hash directory for 128-bit keys/values
+- Optimized for scale, throughput, and crash consistency
+- HDF5 SWMR mode for concurrency; extensible hashing for scalability
 
-**Optimization:**
+**Non-Goals:**
+- No range queries (unordered keys)
+- No in-place updates (append-only)
+- Readers see eventual consistency
+- No built-in access control, authentication, or encryption (must be external)
 
-- **HDF5 SWMR mode:** Enables concurrent reads during writes.
-- **Extensible hashing:** Dynamically resizes buckets to maintain performance.
-- **Sharded value sets:** Groups values into chunked datasets to limit metadata overhead.
-
-## 1.2 Use Case
-Designed for triplestore backends requiring semantically stable key-value mappings where:
-
-- **Keys** are immutable, SHA3-derived identifiers (e.g., truncated CIDs or composite SPO hashes).
-- **Values** represent relationships (e.g., all objects O for a subject-predicate pair (S, P)).
-- **Operations** are read-heavy, with bursty bulk inserts and rare deletions.
-
-## 1.3 Key Characteristics
-### Key Semantics:
-
-- SHA3-derived keys are uniformly distributed, optimizing hash-table performance.
-- Composite keys (e.g., (S, P) → O) are precomputed externally; the hash directory treats them as opaque 128-bit values.
-
-### Value Storage:
-
-- Values are stored in contiguous, compressed HDF5 datasets grouped by key shards.
-- No in-band metadata (e.g., counts)—value sets are append-only for simplicity.
-
-### Concurrency:
-
-- Single writer with global lock for bucket resizing/value appends.
-- Unlimited readers via HDF5’s SWMR mode.
-
-## 1.4 Performance Targets
-| Metric            | Target                  | Rationale                          |
-|-------------------|-------------------------|------------------------------------|
-| Insert Throughput | >1M ops/sec (batched)   | Bulk ingestion of AI training data |
-| Lookup Latency    | <50µs (avg), <100µs (P99)| Real-time query responsiveness     |
-| Recovery Time     | <30s after crash        | SWMR + WAL checkpointing           |
-| Scalability       | 1B keys, 100B values    | Chunked/sharded storage            |
-
-## 1.5 Non-Goals
-
-- **Range Queries:** Keys are unordered; use external indexing for [key₁, key₂] scans.
-- **In-Place Updates:** Keys/values are immutable once written.
-- **Transaction Isolation:** Readers see eventually consistent states after writes.
-
-## 1.6 Architecture Overview
+### Architecture Overview
 ```mermaid
 graph TD
     A[Writer] -->|HDF5 SWMR| B[HDF5 File]
@@ -60,13 +30,11 @@ graph TD
     B --> E[WAL]
     F[Reader] -->|SWMR| B
     G[Reader] -->|SWMR| B
-
     subgraph Hash Directory
         C --> C1[Bucket 0]
         C --> C2[Bucket 1]
         C --> Cn[Bucket N]
     end
-
     subgraph Value Sets
         D --> D1[Group 0: 1M keys]
         D --> D2[Group 1: 1M keys]
@@ -74,20 +42,24 @@ graph TD
     end
 ```
 
-## 1.7 Design Invariants
-
-- **Key Immutability:** Once written, a key’s value set cannot be modified (only appended to).
-- **Bucket Load Factor:** Hash buckets resize when >75% full to maintain O(1) lookups.
-- **Value Set Sharding:** No group exceeds 1M keys to limit metadata overhead.
-
 ## 1.8 Dependencies
 
-| Dependency       | Version   | Description                                                                 |
-|------------------|-----------|-----------------------------------------------------------------------------|
-| **Python**       | 3.12      | The minimum required version for compatibility with the latest language features. |
-| **HDF5**         | 1.14.6    | Provides scalable, chunked, and compressed storage for nodes and value datasets. |
-| **h5py**         | 3.13      | Python interface to the HDF5 library, enabling hierarchical data management in Python. |
-| **NumPy**        | 2.2.5    | Used for efficient data manipulation and defining structured data types.    |
-| **CRC32C**       | 2.7.1    | Used for checksum validation to ensure data integrity.                      |
+| Dependency       | Version   | Description                                  |
+|------------------|-----------|----------------------------------------------|
+| Python           | 3.12      | Minimum required version                     |
+| HDF5             | 1.14.6    | Scalable, chunked, compressed storage        |
+| h5py             | 3.13      | Python interface to HDF5                     |
+| NumPy            | 2.2.5     | Efficient data manipulation, dtypes          |
+| CRC32C           | 2.7.1     | Checksum validation for data integrity       |
 
-These dependencies are critical for achieving the performance targets and architectural goals outlined in this specification.
+---
+
+## 1.9 Testing & Validation
+
+- System-level tests cover all workflows (insert, lookup, delete, split/merge, promotion/demotion)
+- Crash recovery tests simulate failures at all WAL/CoW/metadata stages
+- Fuzzing/randomized ops to uncover edge cases and concurrency bugs
+- GC/orphan detection tests ensure correct reclamation and reconciliation
+- All recovery/GC ops must be idempotent and leave the system consistent
+
+> **Note:** These strategies are mandatory for production and must be in CI. Manual and automated validation of recovery paths is essential for long-term data safety.

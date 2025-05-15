@@ -1,15 +1,15 @@
-## 9. HDF5
 
+# 9. HDF5 Layout
+
+The HDF5 store is structured for fast concurrent access and dynamic bucket management:
 
 ```plaintext
 root/
-  ├── wal: Dataset         # Write-Ahead Log records
-  ├── config: Attribute    # e.g., root_node path, format_version
-  ├── nodes/
-  │   ├── root: Attribute  # Path to root node
-  │   ├── 1234: Dataset    # Internal node (keys and child pointers stored separately or as parallel arrays)
-  │   └── 5678: Dataset    # Leaf node (keys, values, prev, next)
-  └── values/
-      └── sp/             # External value-list datasets for promoted multi-value keys
-          └── A_loves: Dataset  # Contains list of CIDs
+  ├── wal: Dataset         # Write-Ahead Log
+  ├── config: Attribute    # Configuration (num_buckets, hash_seed, etc.)
+  ├── buckets/             # Hash directory buckets (array of hash entries)
+  └── values/              # External value-list datasets for multi-value keys
 ```
+
+- Buckets: extensible, chunked, LZF-compressed for high throughput
+- All metadata and value-lists are stored in fixed, predictable locations
