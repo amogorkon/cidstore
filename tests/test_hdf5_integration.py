@@ -3,11 +3,13 @@ Spec 9: HDF5 Integration (TDD)
 Covers advanced HDF5 layout, sharding, hybrid directory, and metrics/logging if present.
 All tests are TDD-style and implementation-agnostic.
 """
+
 import h5py
-import pytest
+
 
 def test_hdf5_sharding_and_layout(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "shard.h5"
     tree = CIDTree(str(path))
     # Insert enough keys to trigger sharding/hybrid directory (if supported)
@@ -18,8 +20,10 @@ def test_hdf5_sharding_and_layout(tmp_path):
         found_shard = any("shard" in k or "hybrid" in k for k in f.keys())
         assert found_shard or True  # Accept if not present
 
+
 def test_hdf5_metrics_and_logging(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "metrics.h5"
     tree = CIDTree(str(path))
     tree.insert("metrics", 1)

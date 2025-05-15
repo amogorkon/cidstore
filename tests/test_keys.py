@@ -1,6 +1,7 @@
 # Additional tests for CID, immutability, and ValueSet/HashEntry integration
 import pytest
 
+
 def test_cid_immutability():
     e = E(0x1234567890ABCDEF1234567890ABCDEF)
     with pytest.raises(AttributeError):
@@ -8,10 +9,13 @@ def test_cid_immutability():
     with pytest.raises(AttributeError):
         e.low = 0
 
+
 def test_cid_in_valueset_and_hashentry():
     # Simulate ValueSet and HashEntry usage
-    from cidtree.main import CIDTree
     import tempfile
+
+    from cidtree.main import CIDTree
+
     with tempfile.TemporaryDirectory() as tmp:
         tree = CIDTree(f"{tmp}/test.h5")
         key = E(0x11112222333344445555666677778888)
@@ -19,6 +23,8 @@ def test_cid_in_valueset_and_hashentry():
         tree.insert(key, value)
         result = list(tree.lookup(key))
         assert value in result or int(value) in [int(x) for x in result]
+
+
 """test_entity.py
 
 Tests for the entity.py module which defines the E class and composite key functions.

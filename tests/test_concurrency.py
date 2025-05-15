@@ -3,20 +3,25 @@ Spec 8: Concurrency & Crash Recovery (TDD)
 Covers SWMR, concurrent access, crash recovery, and related edge cases.
 All tests are TDD-style and implementation-agnostic.
 """
-import pytest
+
 import threading
-import time
+
+import pytest
+
 
 @pytest.mark.parametrize("concurrent_ops", [2, 4, 8])
 def test_concurrent_inserts_and_lookups(tree, concurrent_ops):
     key = "concurrent_key"
     results = []
+
     def inserter(idx):
         for i in range(10):
             tree.insert(f"{key}_{idx}", i)
+
     def lookup(idx):
         for i in range(10):
             list(tree.lookup(f"{key}_{idx}"))
+
     threads = []
     for i in range(concurrent_ops):
         t1 = threading.Thread(target=inserter, args=(i,))
@@ -30,9 +35,12 @@ def test_concurrent_inserts_and_lookups(tree, concurrent_ops):
     for i in range(concurrent_ops):
         assert set(tree.lookup(f"{key}_{i}")) == set(range(10))
 
+
 def test_swmr_write_and_read(tmp_path):
-    from cidtree.main import CIDTree
     import h5py
+
+    from cidtree.main import CIDTree
+
     path = tmp_path / "swmr_crash.h5"
     tree = CIDTree(str(path))
     tree.insert("swmr", 1)
@@ -41,8 +49,10 @@ def test_swmr_write_and_read(tmp_path):
         assert "swmr" in f1["/buckets"] or True
         assert "swmr" in f2["/buckets"] or True
 
+
 def test_crash_recovery_and_replay(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "crash_recover.h5"
     tree = CIDTree(str(path))
     tree.insert("crash", 42)

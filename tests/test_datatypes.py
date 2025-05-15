@@ -5,7 +5,9 @@ All tests are TDD-style and implementation-agnostic.
 """
 
 import pytest
+
 from cidtree.keys import E
+
 
 def test_e_high_low():
     """Test that the high and low properties yield the correct 64-bit parts."""
@@ -16,6 +18,7 @@ def test_e_high_low():
     assert e.high == expected_high
     assert e.low == expected_low
 
+
 def test_e_immutability():
     """E instances should be immutable."""
     e = E(0x1234567890ABCDEF1234567890ABCDEF)
@@ -24,6 +27,7 @@ def test_e_immutability():
     with pytest.raises(AttributeError):
         e.low = 0
 
+
 def test_e_to_from_hdf5():
     """Test that converting to HDF5 and back preserves the key."""
     value = (0x1234567890ABCDEF << 64) | 0x0FEDCBA098765432
@@ -31,6 +35,7 @@ def test_e_to_from_hdf5():
     h5 = e.to_hdf5()
     e2 = E.from_hdf5(h5)
     assert int(e2) == int(e)
+
 
 def test_e_in_valueset_and_hashentry(directory):
     """Test that E can be used as a key and value in ValueSet/HashEntry."""

@@ -1,9 +1,10 @@
 # Basic HDF5 layout and attribute tests for CIDTree
-import pytest
 import h5py
+
 
 def test_hdf5_file_layout(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "layout.h5"
     tree = CIDTree(str(path))
     # Insert a value to ensure file is initialized
@@ -17,8 +18,10 @@ def test_hdf5_file_layout(tmp_path):
         found_wal = any("wal" in k for k in f.keys()) or any("wal" in g for g in f)
         assert found_wal
 
+
 def test_hdf5_attributes_and_metadata(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "meta.h5"
     tree = CIDTree(str(path))
     tree.insert("bar", 2)
@@ -28,8 +31,10 @@ def test_hdf5_attributes_and_metadata(tmp_path):
         assert "format_version" in config.attrs
         assert "version_string" in config.attrs
 
+
 def test_hdf5_bucket_and_valueset_presence(tmp_path):
     from cidtree.main import CIDTree
+
     path = tmp_path / "bucketval.h5"
     tree = CIDTree(str(path))
     key = "baz"

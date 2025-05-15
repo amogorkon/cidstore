@@ -6,6 +6,7 @@ All tests are TDD-style and implementation-agnostic.
 
 import pytest
 
+
 def test_bucket_split_trigger(bucket):
     """Inserting entries beyond threshold should trigger a split."""
     for i in range(bucket.SPLIT_THRESHOLD + 1):
@@ -18,6 +19,7 @@ def test_bucket_split_trigger(bucket):
         assert new_bucket.size() <= bucket.SPLIT_THRESHOLD
     else:
         pytest.skip("Split not implemented")
+
 
 def test_bucket_merge_trigger(bucket):
     """Deleting entries to underfill two buckets should trigger a merge."""
@@ -38,6 +40,7 @@ def test_bucket_merge_trigger(bucket):
             pytest.skip("Merge not implemented")
     else:
         pytest.skip("Split not implemented")
+
 
 def test_split_merge_invariants(bucket):
     """After split and merge, all invariants should hold and data should be preserved or deleted as expected."""

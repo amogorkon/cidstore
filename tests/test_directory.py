@@ -6,11 +6,12 @@ All tests are TDD-style and implementation-agnostic.
 
 import pytest
 
+
 def test_bucket_split_and_merge(bucket):
     """Inserting enough entries should trigger a split; merging should restore invariants."""
     for i in range(bucket.SPLIT_THRESHOLD + 1):
         bucket.insert(f"k{i}", i)
-    if hasattr(bucket, 'split'):
+    if hasattr(bucket, "split"):
         new_bucket, sep = bucket.split()
         assert bucket.validate()
         assert new_bucket.validate()
@@ -22,7 +23,7 @@ def test_sorted_unsorted_region_logic(bucket):
     """Test sorted/unsorted region logic per spec 3 (placeholder if not implemented)."""
     for i in range(10):
         bucket.insert(f"srt{i}", i)
-    if hasattr(bucket, 'get_sorted_count'):
+    if hasattr(bucket, "get_sorted_count"):
         sorted_count = bucket.get_sorted_count()
         assert 0 <= sorted_count <= bucket.size()
         # Optionally, check that the sorted region is actually sorted

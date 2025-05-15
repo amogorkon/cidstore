@@ -4,10 +4,12 @@ Covers deletion, garbage collection, compaction, tombstone handling, and edge ca
 All tests are TDD-style and implementation-agnostic.
 """
 
+
 def test_delete_and_lookup(directory):
     directory.insert("key1", 1)
     directory.delete("key1")
     assert list(directory.lookup("key1")) == []
+
 
 def test_multi_value_deletion_and_gc(directory):
     key = "multi"
@@ -24,6 +26,7 @@ def test_multi_value_deletion_and_gc(directory):
     if hasattr(directory, "get_tombstone_count"):
         assert directory.get_tombstone_count(key) == 0
 
+
 def test_gc_removes_empty_valueset(directory):
     key = "to_gc"
     directory.insert(key, 42)
@@ -33,6 +36,7 @@ def test_gc_removes_empty_valueset(directory):
     assert list(directory.lookup(key)) == []
     if hasattr(directory, "valueset_exists"):
         assert not directory.valueset_exists(key)
+
 
 def test_orphan_detection_and_reclamation(directory):
     key = "orphan"
@@ -44,17 +48,22 @@ def test_orphan_detection_and_reclamation(directory):
         directory.compact(key)
     assert list(directory.lookup(key)) == []
 
+
 def test_concurrent_deletion_and_gc(directory):
     import threading
+
     key = "concurrent"
     for i in range(5):
         directory.insert(key, i)
+
     def delete_some():
         for i in range(5):
             directory.delete(key, i)
+
     def compact():
         if hasattr(directory, "compact"):
             directory.compact(key)
+
     t1 = threading.Thread(target=delete_some)
     t2 = threading.Thread(target=compact)
     t1.start()
@@ -62,6 +71,7 @@ def test_concurrent_deletion_and_gc(directory):
     t1.join()
     t2.join()
     assert list(directory.lookup(key)) == []
+
 
 def test_idempotent_gc(directory):
     key = "idempotent"
@@ -72,6 +82,7 @@ def test_idempotent_gc(directory):
         directory.compact(key)
     assert list(directory.lookup(key)) == []
 
+
 def test_wal_and_deletion_log_replay(directory):
     key = "replay"
     directory.insert(key, 123)
@@ -79,6 +90,7 @@ def test_wal_and_deletion_log_replay(directory):
     if hasattr(directory, "recover"):
         directory.recover()
     assert list(directory.lookup(key)) == []
+
 
 def test_underfilled_bucket_merge(directory):
     for i in range(20):

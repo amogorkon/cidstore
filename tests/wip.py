@@ -4,7 +4,7 @@ import inspect
 
 # ===========================================
 from cidtree.storage import StorageManager as S
-from cidtree.tree import BPlusTree as B
+from cidtree.tree import CIDTree as B
 
 S, B
 # ===========================================

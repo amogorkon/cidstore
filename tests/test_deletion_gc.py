@@ -3,8 +3,6 @@ Tests for deletion, GC, compaction, and related workflows in the canonical hash 
 All tests are TDD-style and implementation-agnostic.
 """
 
-import pytest
-
 
 def test_delete_and_lookup(directory):
     directory.insert("key1", 1)

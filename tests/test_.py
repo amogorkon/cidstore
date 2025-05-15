@@ -1,20 +1,19 @@
 """Core tests to quickly check the basic functionality of the library on every edit."""
 
-
-import pytest
 import threading
 
-from cidtree.config import NODES_GROUP
+import pytest
+
 from cidtree.keys import E
 from cidtree.storage import StorageManager
-from cidtree.tree import BPlusTree
+from cidtree.tree import CIDTree
 
 
 def test_standard_workflow(tmp_path):
     # 1. Create storage and tree
     h5file = tmp_path / "workflow.h5"
     storage = StorageManager(path=str(h5file))
-    tree = BPlusTree(storage)
+    tree = CIDTree(storage)
 
     # 2. Insert basic keys and values
     k_alpha = E.from_str("alpha")
@@ -50,26 +49,19 @@ def test_standard_workflow(tmp_path):
         key = E.from_str(f"bulk{i}")
         assert not list(tree.lookup(key))
 
-    # 7. Node splits: ensure multiple internal node datasets
-    # Perform enough inserts to trigger splits in both leaf and internal nodes
+    # 7. Node splits: perform enough inserts to trigger splits in both leaf and internal nodes
     for i in range(1, 1001):
         tree.insert(E(i), k_multi)
-    storage.open()  # Ensure file is open before subscripting
-    # Ensure the group is a group, not a dataset, and list its keys
-    group = storage.open()[NODES_GROUP]
-    # h5py Group objects have .keys(), but Dataset does not. If group is a Dataset, treat as no nodes.
-    import h5py
-
-    node_names = list(group.keys()) if isinstance(group, h5py.Group) else []
-    # Accept any internal node group (e.g., names starting with 'internal' or containing 'internal')
-    assert any("internal" in name.lower() for name in node_names)
+    # Implementation-agnostic: verify the tree is still operational after splits
+    assert list(tree.lookup(k_beta)) == [E(2)]
+    assert set(tree.lookup(k_multi)) == set(E(i) for i in range(1, 151))
 
 
 def test_wal_recovery(tmp_path):
     # Write entries then reopen to test WAL replay
     file = tmp_path / "walrec.h5"
     storage1 = StorageManager(path=str(file))
-    tree1 = BPlusTree(storage1)
+    tree1 = CIDTree(storage1)
     k = E.from_str("recov")
     tree1.insert(k, E(1))
     if storage1.file:
@@ -77,14 +69,14 @@ def test_wal_recovery(tmp_path):
 
     # Reopen storage and tree -> WAL should replay
     storage2 = StorageManager(path=str(file))
-    tree2 = BPlusTree(storage2)
+    tree2 = CIDTree(storage2)
     assert list(tree2.lookup(k)) == [E(1)]
 
 
 def test_concurrent_writes(tmp_path):
     # Test concurrent inserts of distinct keys
     storage = StorageManager(path=str(tmp_path / "swmr.h5"))
-    tree = BPlusTree(storage)
+    tree = CIDTree(storage)
 
     def worker(start, results):
         for i in range(start + 1, start + 51):

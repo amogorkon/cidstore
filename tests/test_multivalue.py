@@ -4,7 +4,6 @@ Covers inline vs. spill (external ValueSet) promotion/demotion, compaction, and 
 All tests are TDD-style and implementation-agnostic.
 """
 
-import pytest
 
 def test_inline_to_spill_promotion(directory):
     """Inserting enough values for a key should promote from inline to external ValueSet."""
@@ -16,6 +15,7 @@ def test_inline_to_spill_promotion(directory):
     # All values should be present
     result = list(directory.lookup(key))
     assert all(i in [int(x) for x in result] for i in range(1, 201))
+
 
 def test_spill_to_inline_demotion(directory):
     """After deleting values, ValueSet may be demoted back to inline if below threshold."""
@@ -31,6 +31,7 @@ def test_spill_to_inline_demotion(directory):
     result = list(directory.lookup(key))
     assert all(i in [int(x) for x in result] for i in range(190, 201))
 
+
 def test_compaction_removes_tombstones(directory):
     """Compaction should remove tombstones and reclaim space in ValueSet."""
     key = "compact"
@@ -43,6 +44,7 @@ def test_compaction_removes_tombstones(directory):
     result = list(directory.lookup(key))
     assert all(i in [int(x) for x in result] for i in range(5, 10))
     assert all(i not in [int(x) for x in result] for i in range(0, 5))
+
 
 def test_multivalue_edge_cases(directory):
     """Test edge cases: duplicate insert, delete non-existent, etc."""

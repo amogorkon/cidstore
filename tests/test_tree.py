@@ -1,10 +1,12 @@
+import threading
 
 import pytest
-import threading
+
 from cidtree.keys import E
 
 # Directory/Bucket Spec Compliance Tests (TDD, Hash Directory Model)
 # All tests are spec-driven and implementation-agnostic.
+
 
 def test_sorted_unsorted_region(directory):
     """Insert values and check sorted/unsorted region logic per spec 3."""
@@ -64,10 +66,6 @@ def test_state_mask_ecc(tree):
     # TODO: If metrics/logging/tracing APIs are available, check for merge/GC events
 
 
-
-import pytest
-from cidtree.keys import E
-import threading
 def test_btree_initialization(tree):
     assert tree is not None
 
@@ -101,12 +99,11 @@ def test_multi_value_promotion(tree):
     assert 200 in [int(x) for x in result]
 
 
-
 def test_split_and_merge(directory):
     """Insert enough keys to trigger a split; merging should restore invariants (Spec 3, 6)."""
     for i in range(1, directory.SPLIT_THRESHOLD + 2):
         directory.insert(f"split{i}", i)
-    if hasattr(directory, 'split'):
+    if hasattr(directory, "split"):
         new_dir, sep = directory.split()
         assert directory.validate()
         assert new_dir.validate()
@@ -124,7 +121,6 @@ def test_split_and_merge(directory):
 # - Document any missing features or APIs as not covered
 
 
-
 def test_deletion_and_gc(directory):
     """Insert, delete, and check GC/compaction per spec 7."""
     for i in range(1, 11):
@@ -134,18 +130,19 @@ def test_deletion_and_gc(directory):
     for i in range(1, 11):
         result = list(directory.lookup(f"delgc{i}"))
         assert result == []
-    if hasattr(directory, 'compact'):
+    if hasattr(directory, "compact"):
         for i in range(1, 11):
             directory.compact(f"delgc{i}")
-
 
 
 def test_concurrent_insert(directory):
     """Simulate concurrent inserts and check for correct multi-value behavior (Spec 8)."""
     results = []
+
     def writer():
         directory.insert("swmr", 123)
         results.append(directory.lookup("swmr"))
+
     t1 = threading.Thread(target=writer)
     t2 = threading.Thread(target=writer)
     t1.start()
@@ -195,7 +192,6 @@ def test_delete(tree):
     assert result == []
 
 
-
 def test_multiple_inserts_and_deletes(directory):
     items = [(f"k{i}", i) for i in range(1, 11)]
     for k, v in items:
@@ -211,12 +207,10 @@ def test_multiple_inserts_and_deletes(directory):
         assert result == []
 
 
-
 def test_nonexistent_key(directory):
     """Lookup for a key that was never inserted should return an empty result."""
     result = list(directory.lookup("notfound"))
     assert result == []
-
 
 
 def test_bulk_insert(directory):
@@ -226,7 +220,6 @@ def test_bulk_insert(directory):
         result = list(directory.lookup(f"bulk{i}"))
         assert len(result) == 1
         assert int(result[0]) == i
-
 
 
 def test_bulk_delete(directory):
