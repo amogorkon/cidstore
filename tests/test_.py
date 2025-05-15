@@ -1,6 +1,8 @@
-import threading
+"""Core tests to quickly check the basic functionality of the library on every edit."""
+
 
 import pytest
+import threading
 
 from cidtree.config import NODES_GROUP
 from cidtree.keys import E
