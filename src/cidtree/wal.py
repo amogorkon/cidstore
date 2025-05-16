@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import logging
 import os
 import struct
 from enum import Enum
@@ -11,9 +12,68 @@ import h5py
 import numpy as np
 from filelock import FileLock
 
-from .config import WAL_DATASET, WAL_METADATA_GROUP
 from .keys import E
+
+try:
+    from prometheus_client import Counter, Gauge
+
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+# Prometheus metrics (if prometheus_client is available)
+if PROMETHEUS_AVAILABLE:
+    wal_records_appended = Counter(
+        "cidtree_wal_records_appended", "Number of WAL records appended", ["operation"]
+    )
+    wal_replay_count = Counter(
+        "cidtree_wal_replay_count", "Number of WAL replays executed"
+    )
+    wal_hmac_audit_failures = Counter(
+        "cidtree_wal_hmac_audit_failures", "Number of HMAC audit failures"
+    )
+    wal_truncate_count = Counter(
+        "cidtree_wal_truncate_count", "Number of WAL truncations"
+    )
+    wal_error_count = Counter(
+        "cidtree_wal_error_count", "Number of WAL errors encountered", ["type"]
+    )
+    wal_last_watermark = Gauge(
+        "cidtree_wal_last_watermark", "Current WAL watermark (record count)"
+    )
+
+# WAL constants
+HARDCODED_WAL_SECRET = b"cidtree-wal-secret"
+MAX_TXN_RECORDS = 1024
+NULL_HMAC = b"\x00" * 32
+
+
+
+from .config import WAL_DATASET, WAL_METADATA_GROUP
 from .storage import StorageManager
+
+# Canonical WAL record dtype (Spec 2.2, plus HMAC fields for integrity)
+wal_dtype = np.dtype([
+    ("txn_id", "<u8"),
+    ("op_type", "u1"),
+    ("key_high", "<u8"),
+    ("key_low", "<u8"),
+    ("value_high", "<u8"),
+    ("value_low", "<u8"),
+    ("hmac", "S32"),  # 32 bytes for HMAC-SHA256
+    ("prev_hmac", "S32"),
+])
+
+# Canonical HashEntry dtype for HDF5-backed buckets (Spec 2, 3, 5, 9)
+hash_entry_dtype = np.dtype([
+    ("key_high", "<u8"),
+    ("key_low", "<u8"),
+    ("slots", "<u8", 4),         # 4x 64-bit slots: inline values or spill pointer/metadata
+    ("state_mask", "u1"),        # ECC-protected state mask (8 bits)
+    ("version", "<u4"),          # Version for atomic updates/CoW
+])
 
 
 class OpType(Enum):
@@ -41,6 +101,15 @@ class RecoveryError(RuntimeError):
 
 
 class WAL:
+    """
+    WAL: Write-ahead log and recovery logic for CIDTree (Spec 2.2, 3, 6, 7).
+
+    - Canonical HDF5-backed WAL with chained HMAC for integrity.
+    - All mutating operations (insert, delete, split, merge, compaction) are logged.
+    - Supports replay, audit, and recovery (idempotent, crash-safe).
+    - Exposes Prometheus metrics and logging for monitoring.
+    """
+
     def __init__(self, storage: StorageManager):
         self.storage: StorageManager = storage
         self.lock: FileLock = FileLock(f"{str(storage.path)}.wal.lock")
@@ -197,6 +266,9 @@ class WAL:
             logger.info(
                 f"Appended {len(records)} WAL record(s); new watermark is {self.watermark}."
             )
+            if PROMETHEUS_AVAILABLE:
+                wal_records_appended.labels(operation="append").inc(len(records))
+                wal_last_watermark.set(self.watermark)
 
     def replay(self, apply_limit: Optional[int] = None) -> None:
         """
@@ -220,6 +292,9 @@ class WAL:
                 computed_hmac = self._compute_hmac(rec, prev_hmac)
                 if not hmac.compare_digest(computed_hmac, rec["hmac"]):
                     logger.error(f"HMAC mismatch at record {i}")
+                    if PROMETHEUS_AVAILABLE:
+                        wal_hmac_audit_failures.inc()
+                        wal_error_count.labels(type="hmac_mismatch").inc()
                     raise SecurityError(f"HMAC mismatch at record {i}")
 
                 op_type = OpType.from_value(rec["op_type"])
@@ -234,11 +309,15 @@ class WAL:
                 elif op_type in (OpType.INSERT, OpType.DELETE):
                     if txn_id not in active_txns:
                         logger.error(f"Orphaned operation at record {i}")
+                        if PROMETHEUS_AVAILABLE:
+                            wal_error_count.labels(type="orphaned_op").inc()
                         raise ConsistencyError(f"Orphaned operation at record {i}")
                     active_txns[txn_id]["ops"].append(rec)
                 elif op_type == OpType.TXN_COMMIT:
                     if txn_id not in active_txns:
                         logger.error(f"Commit for unknown transaction at record {i}")
+                        if PROMETHEUS_AVAILABLE:
+                            wal_error_count.labels(type="commit_unknown_txn").inc()
                         raise ConsistencyError(
                             f"Commit for unknown transaction at record {i}"
                         )
@@ -260,6 +339,8 @@ class WAL:
             logger.info(
                 f"Replay complete. last_applied set to {self.file[WAL_METADATA_GROUP].attrs['last_applied']}."
             )
+            if PROMETHEUS_AVAILABLE:
+                wal_replay_count.inc()
 
     def truncate(self, confirmed_through: int) -> None:
         """Truncate WAL after confirmed persisted state."""
@@ -270,24 +351,34 @@ class WAL:
                 self.ds.resize((keep_records,))
                 self.file.flush()
                 logger.info(f"Truncated WAL to last {keep_records} records.")
+                if PROMETHEUS_AVAILABLE:
+                    wal_truncate_count.inc()
 
     def _apply_transaction(self, txn: Dict) -> None:
         """Apply a transaction atomically to main storage."""
         try:
             for rec in txn["ops"]:
-                key = E((int(rec["key_high"]) << 64) | int(rec["key_low"]))
-                value = E((int(rec["value_high"]) << 64) | int(rec["value_low"]))
                 op = OpType.from_value(rec["op_type"])
                 if op == OpType.INSERT:
-                    # Pass version tracking to storage.
-                    self.storage.apply_insert(key, value)
+                    self.storage.apply_insert(
+                        E((int(rec["key_high"]) << 64) | int(rec["key_low"])),
+                        E((int(rec["value_high"]) << 64) | int(rec["value_low"])),
+                    )
                 elif op == OpType.DELETE:
-                    self.storage.apply_delete(key)
+                    self.storage.apply_delete(
+                        E((int(rec["key_high"]) << 64) | int(rec["key_low"]))
+                    )
             self.file[WAL_METADATA_GROUP].attrs["last_txn_id"] = txn["txn_id"]
             logger.info(f"Applied transaction {txn['txn_id']}.")
+            if PROMETHEUS_AVAILABLE:
+                wal_records_appended.labels(operation="apply_transaction").inc(
+                    len(txn["ops"])
+                )
         except Exception as e:
             self._rollback_transaction(txn)
             logger.exception(f"Failed to apply transaction {txn['txn_id']}: {e}")
+            if PROMETHEUS_AVAILABLE:
+                wal_error_count.labels(type="apply_transaction").inc()
             raise RecoveryError(
                 f"Failed to apply transaction {txn['txn_id']}: {e}"
             ) from e
@@ -302,8 +393,12 @@ class WAL:
         try:
             # No-op: StorageManager does not support rollback_to_version by default.
             logger.info(f"Rollback to version {txn['txn_id']} completed (noop).")
+            if PROMETHEUS_AVAILABLE:
+                wal_error_count.labels(type="rollback").inc()
         except Exception as e:
             logger.exception(f"Rollback error for transaction {txn['txn_id']}: {e}")
+            if PROMETHEUS_AVAILABLE:
+                wal_error_count.labels(type="rollback_exception").inc()
 
     def audit_hmac(self, sample_size: int = 100) -> None:
         """Periodically verify random records' HMACs for audit purposes."""
@@ -318,5 +413,23 @@ class WAL:
                 computed_hmac = self._compute_hmac(rec, prev_hmac)
                 if not hmac.compare_digest(rec["hmac"], computed_hmac):
                     logger.error(f"Audit: HMAC mismatch at record {i}")
+                    if PROMETHEUS_AVAILABLE:
+                        wal_hmac_audit_failures.inc()
+                        wal_error_count.labels(type="audit_hmac").inc()
                     raise SecurityError(f"Audit: HMAC mismatch at record {i}")
             logger.info(f"Audit completed for {sample_size} random records.")
+
+    # --- Metrics/Logging hooks for external monitoring ---
+    @staticmethod
+    def prometheus_metrics():
+        """Return Prometheus metrics for WAL (for registry scraping)."""
+        if not PROMETHEUS_AVAILABLE:
+            return []
+        return [
+            wal_records_appended,
+            wal_replay_count,
+            wal_hmac_audit_failures,
+            wal_truncate_count,
+            wal_error_count,
+            wal_last_watermark,
+        ]

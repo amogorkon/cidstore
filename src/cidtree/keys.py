@@ -13,6 +13,13 @@ KEY_DTYPE = np.dtype([("high", "<u8"), ("low", "<u8")])
 
 
 class E(int):
+    """
+    E: 128-bit entity identifier for CIDTree keys/values.
+
+    - Immutable, hashable, and convertible to/from HDF5.
+    - Used for all key/value storage and WAL logging.
+    - See Spec 2 for canonical dtype and encoding.
+    """
     def __getitem__(self, item):
         if item == "high":
             return [self.high]

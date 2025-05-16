@@ -1,7 +1,5 @@
 """node.py - Node structure and dtype definitions for CIDTree"""
 
-"""node.py - Node structure and dtype definitions for CIDTree"""
-
 import numpy as np
 
 leaf_dtype = np.dtype([
