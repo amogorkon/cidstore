@@ -5,14 +5,16 @@ import threading
 import pytest
 
 from cidtree.keys import E
-from cidtree.storage import StorageManager
+from cidtree.storage import Storage
 from cidtree.tree import CIDTree
 
 
 def test_standard_workflow(tmp_path):
     # 1. Create storage and tree
-    h5file = tmp_path / "workflow.h5"
-    storage = StorageManager(path=str(h5file))
+    from pathlib import Path
+
+    h5file = Path(tmp_path) / "workflow.h5"
+    storage = Storage(path=h5file)
     tree = CIDTree(storage)
 
     # 2. Insert basic keys and values
@@ -20,20 +22,20 @@ def test_standard_workflow(tmp_path):
     k_beta = E.from_str("beta")
     tree.insert(k_alpha, E(1))
     tree.insert(k_beta, E(2))
-    assert list(tree.lookup(k_alpha)) == [E(1)]
-    assert list(tree.lookup(k_beta)) == [E(2)]
+    assert list(tree.get(k_alpha)) == [E(1)]
+    assert list(tree.get(k_beta)) == [E(2)]
 
     # 4. Multi-value key: insert same key many times
     k_multi = E.from_str("multi")
     for i in range(1, 151):
         tree.insert(k_multi, E(i))
-    values = list(tree.lookup(k_multi))
-    # Multi-value: order is preserved, but allow for duplicates and check set equality
-    assert set(values) == set(E(i) for i in range(1, 151))
+    values = list(tree.get(k_multi))
+    # Multi-value: values should be unique, no duplicates, order not guaranteed
+    assert values == [E(i) for i in range(1, 151)]
 
     # 5. Delete and check
     tree.delete(k_alpha)
-    assert not list(tree.lookup(k_alpha))
+    assert not list(tree.get(k_alpha))
 
     # 6. Bulk insert/delete
     for i in range(10, 20):
@@ -41,26 +43,28 @@ def test_standard_workflow(tmp_path):
         tree.insert(key, E(i))
     for i in range(10, 20):
         key = E.from_str(f"bulk{i}")
-        assert list(tree.lookup(key)) == [E(i)]
+        assert list(tree.get(key)) == [E(i)]
     for i in range(10, 20):
         key = E.from_str(f"bulk{i}")
         tree.delete(key)
     for i in range(10, 20):
         key = E.from_str(f"bulk{i}")
-        assert not list(tree.lookup(key))
+        assert not list(tree.get(key))
 
     # 7. Node splits: perform enough inserts to trigger splits in both leaf and internal nodes
     for i in range(1, 1001):
         tree.insert(E(i), k_multi)
     # Implementation-agnostic: verify the tree is still operational after splits
-    assert list(tree.lookup(k_beta)) == [E(2)]
-    assert set(tree.lookup(k_multi)) == set(E(i) for i in range(1, 151))
+    assert list(tree.get(k_beta)) == [E(2)]
+    assert set(tree.get(k_multi)) == {E(i) for i in range(1, 151)}
 
 
 def test_wal_recovery(tmp_path):
     # Write entries then reopen to test WAL replay
-    file = tmp_path / "walrec.h5"
-    storage1 = StorageManager(path=str(file))
+    from pathlib import Path
+
+    file = Path(tmp_path) / "walrec.h5"
+    storage1 = Storage(path=file)
     tree1 = CIDTree(storage1)
     k = E.from_str("recov")
     tree1.insert(k, E(1))
@@ -68,14 +72,16 @@ def test_wal_recovery(tmp_path):
         storage1.file.close()
 
     # Reopen storage and tree -> WAL should replay
-    storage2 = StorageManager(path=str(file))
+    storage2 = Storage(path=file)
     tree2 = CIDTree(storage2)
-    assert list(tree2.lookup(k)) == [E(1)]
+    assert list(tree2.get(k)) == [E(1)]
 
 
 def test_concurrent_writes(tmp_path):
     # Test concurrent inserts of distinct keys
-    storage = StorageManager(path=str(tmp_path / "swmr.h5"))
+    from pathlib import Path
+
+    storage = Storage(path=Path(tmp_path) / "swmr.h5")
     tree = CIDTree(storage)
 
     def worker(start, results):
@@ -83,7 +89,7 @@ def test_concurrent_writes(tmp_path):
             k = E.from_str(f"key{i}")
             tree.insert(k, E(i))
             # verify immediate lookup
-            results.append((k, list(tree.lookup(k))))
+            results.append((k, list(tree.get(k))))
 
     results = []
     t1 = threading.Thread(target=worker, args=(0, results))

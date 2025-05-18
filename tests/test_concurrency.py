@@ -18,14 +18,14 @@ def test_concurrent_inserts_and_lookups(tree, concurrent_ops):
         for i in range(10):
             tree.insert(f"{key}_{idx}", i)
 
-    def lookup(idx):
+    def get(idx):
         for i in range(10):
-            list(tree.lookup(f"{key}_{idx}"))
+            list(tree.get(f"{key}_{idx}"))
 
     threads = []
     for i in range(concurrent_ops):
         t1 = threading.Thread(target=inserter, args=(i,))
-        t2 = threading.Thread(target=lookup, args=(i,))
+        t2 = threading.Thread(target=get, args=(i,))
         threads.extend([t1, t2])
     for t in threads:
         t.start()
@@ -33,7 +33,7 @@ def test_concurrent_inserts_and_lookups(tree, concurrent_ops):
         t.join()
     # All keys should be present
     for i in range(concurrent_ops):
-        assert set(tree.lookup(f"{key}_{i}")) == set(range(10))
+        assert set(tree.get(f"{key}_{i}")) == set(range(10))
 
 
 def test_swmr_write_and_read(tmp_path):
@@ -64,4 +64,4 @@ def test_crash_recovery_and_replay(tmp_path):
     tree2 = CIDTree(str(path))
     if hasattr(tree2, "recover"):
         tree2.recover()
-    assert set(tree2.lookup("crash")) == {42, 43}
+    assert set(tree2.get("crash")) == {42, 43}

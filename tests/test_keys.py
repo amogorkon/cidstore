@@ -21,7 +21,7 @@ def test_cid_in_valueset_and_hashentry():
         key = E(0x11112222333344445555666677778888)
         value = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
         tree.insert(key, value)
-        result = list(tree.lookup(key))
+        result = list(tree.get(key))
         assert value in result or int(value) in [int(x) for x in result]
 
 

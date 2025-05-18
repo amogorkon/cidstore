@@ -34,3 +34,33 @@ def test_hdf5_metrics_and_logging(tmp_path):
     if hasattr(tree, "get_log"):
         log = tree.get_log()
         assert isinstance(log, list)
+
+
+def test_hdf5_sharded_directory_migration(tmp_path):
+    """Explicitly test sharded directory migration and verify sharded datasets."""
+    import h5py
+
+    from cidtree.main import CIDTree
+
+    path = tmp_path / "sharded_dir.h5"
+    tree = CIDTree(str(path))
+    # Insert enough keys to trigger sharded directory migration (threshold: 1_000_000)
+    SHARD_THRESHOLD = 1_000_000
+    for i in range(SHARD_THRESHOLD + 10):
+        tree.insert(f"shardkey{i}", i)
+    # Force migration if not already triggered
+    if hasattr(tree, "migrate_directory"):
+        tree.migrate_directory()
+    tree.file.flush()
+    # Check that sharded directory exists and is populated
+    with h5py.File(path, "r") as f:
+        assert "directory" in f
+        dir_group = f["directory"]
+        shard_keys = [k for k in dir_group.keys() if k.startswith("shard_")]
+        assert len(shard_keys) > 0
+        # Check that at least one shard dataset is non-empty
+        found_nonempty = any(dir_group[k].shape[0] > 0 for k in shard_keys)
+        assert found_nonempty
+        # Optionally, check that total entries match inserted keys
+        total = sum(dir_group[k].shape[0] for k in shard_keys)
+        assert total >= SHARD_THRESHOLD

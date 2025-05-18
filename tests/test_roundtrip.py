@@ -24,7 +24,7 @@ def test_full_roundtrip(tmp_path):
     # Check all values
     for i in range(100):
         expected = [] if i % 3 == 0 else [i]
-        assert list(tree2.lookup(f"key{i}")) == expected
+        assert list(tree2.get(f"key{i}")) == expected
 
 
 def test_persistence_and_recovery(tmp_path):
@@ -35,7 +35,7 @@ def test_persistence_and_recovery(tmp_path):
     tree.insert("persist", 123)
     del tree
     tree2 = CIDTree(str(path))
-    assert 123 in list(tree2.lookup("persist"))
+    assert 123 in list(tree2.get("persist"))
     if hasattr(tree2, "recover"):
         tree2.recover()
-        assert 123 in list(tree2.lookup("persist"))
+        assert 123 in list(tree2.get("persist"))
