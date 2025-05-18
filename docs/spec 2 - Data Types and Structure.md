@@ -2,7 +2,7 @@
 
 ## 2.1 Data Structure
 
-The following diagram integrates all core data structures, including bucket structure, directory management, and multi-value key/value-list handling:
+**Note:** The UML diagram below is the authoritative source for all structure layouts.
 
 ```mermaid
 classDiagram
@@ -42,17 +42,21 @@ classDiagram
     }
 
     class WALRecord {
-        +txn_id: uint64
-        +op_type: uint8
-        +key_high: uint64
-        +key_low: uint64
-        +value_high: uint64
-        +value_low: uint64
+        +version_op: uint8 "2-bit version, 6-bit opcode"
+        +reserved: uint8 "padding/flags"
+        +time: HybridTime
+        +key: CID
+        +value: CID
         +checksum: uint32
+        +padding: uint8[10]
+    }
+    class HybridTime {
+        +nanos: uint64
+        +seq: uint32
+        +shard_id: uint32
     }
     class DeletionRecord {
-        +key_high: uint64
-        +key_low: uint64
+        +key: CID
         +value_group: fixed[8] bytes
         +timestamp: uint64
     }
@@ -77,10 +81,9 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 |-------------------|--------------------------------------------------------------|--------|------------------------------------------------------------------|
 | Key               | `[high: u64, low: u64]`                                      | 16B    | 128-bit immutable identifier (SHA3 or composite hash)            |
 | Hash Entry        | `[key_high: u64, key_low: u64, value_group: S8, value_start: u32, value_count: u32]` | 32B    | Maps key to value set in bucket; value_group is 8-byte ID        |
-| Value Set        | `[CID[] values, tombstone_count: u32]`                       | Var    | External dataset for high-cardinality keys; tombstone for GC     |
+| Value Set         | `[CID[] values, tombstone_count: u32]`                       | Var    | External dataset for high-cardinality keys; tombstone for GC     |
 | Spill Pointer     | `[shard_id: u16, bucket_local: u32, segment_id: u16]`        | 8B     | Points to external value-list location (spill mode)              |
 | State Mask        | `u8` (ECC-encoded 4-bit mask; 4 bits used, 4 ECC)            | 1B     | Encodes entry state (inline/spill/tombstone); ECC-protected, SIMD-friendly |
-| WAL Record        | `[txn_id: u64, op_type: u8, key_high: u64, key_low: u64, value_high: u64, value_low: u64, checksum: u32]` | 45B    | Logs inserts/deletes for recovery; CRC32 checksum                |
 | Deletion Record   | `[key_high: u64, key_low: u64, value_group: S8, timestamp: u64]` | 32B    | Tracks obsolete keys for GC; timestamp is Unix ns                |
 | Directory         | `[Bucket[] buckets, num_buckets: u32]`                        | Var    | Array of buckets, stored as HDF5 datasets                        |
 | Bucket            | `[HashEntry[] entries, sorted_count: u32, SpillPointer? spill]`| Var    | Bucket with sorted and unsorted regions; `sorted_count` tracks the number of entries in the sorted region (enabling fast binary search), while new inserts are appended to the unsorted region. Optional spill pointer for external value-lists. |
