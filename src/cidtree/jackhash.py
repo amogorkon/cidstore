@@ -1,5 +1,5 @@
 """
-The JACK hash alphabet. 
+The JACK hash alphabet.
 For details see https://pypi.org/project/jackhash
 """
 
@@ -13033,9 +13033,7 @@ chinese_characters = """○
 龠
 龡
 龢
-龤""".split(
-    "\n"
-)
+龤""".split("\n")
 
 korean_characters = """←
 ↑
@@ -40613,15 +40611,14 @@ korean_characters = """←
 﨤
 﨧
 﨨
-﨩""".split(
-    "\n"
-)
+﨩""".split("\n")
 
 # to avoid possible (albeit extremely rare) collisions with regular hexdigests all digits and ABCDEF are removed
 # to avoid problems with selection for copy&paste, all special characters in ASCII are also removed
 ascii_characters = list(
     "ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ¡¢£¤¥¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſƀƁƂƃƄƅƆƇƈƉƊƋƌƍƎƏƐƑƒƓƔƕƖƗƘƙƚƛƜƝƞƟƠơƢƣƤƥƦƧƨƩƪƫƬƭƮƯưƱƲƳƴƵƶƷƸƹƺƻƼƽƾƿǀǁǂǃǄǅǆǇǈǉǊǋǌǍǎǏǐǑǒǓǔǕǖǗǘǙǚǛǜǝǞǟǠǡǢǣǤǥǦǧǨǩǪǫǬǭǮǯǰǱǲǳǴǵǶǷǸǹǺǻǼǽǾǿȀȁȂȃȄȅȆȇȈȉȊȋȌȍȎȏȐȑȒȓȔȕȖȗȘșȚțȜȝȞȟȠȡȢȣȤȥȦȧȨȩȪȫȬȭȮȯȰȱȲȳȴȵȶȷȸȹȺȻȼȽȾȿɀɁɂɃɄɅɆɇɈɉɊɋɌɍɎɏɐɑɒɓɔɕɖɗɘəɚɛɜɝɞɟɠɡɢɣɤɥɦɧɨɩɪɫɬɭɮɯɰɱɲɳɴɵɶɷɸɹɺɻɼɽɾɿʀʁʂʃʄʅʆʇʈʉʊʋʌʍʎʏʐʑʒʓʔʕʖʗʘʙʚʛʜʝʞʟʠʡʢʣʤʥʦʧʨʩʪʫʬʭʮʯʰʱʲʳʴʵʶʷʸʹʺʻʼʽʾʿˀˁ˂˃˄˅ˆˇˈˉˊˋˌˍˎˏːˑ˒˓˔˕˖˗˘˙˚˛˜˝˞˟ˠˡˢˣˤ˥˦˧˨˩˪˫ˬ˭ˮ˯˰˱˲˳˴˵"
 )
+
 
 # emojis only cause interoperability issues
 # japanese alphabet would only add 100 individual chars, not worth the trouble (and GPL is prohibitive)
@@ -40630,7 +40627,9 @@ class AlphabetAccess:
     global ascii_characters
     global chinese_characters
     global korean_characters
-    alphabet = sorted(list(set(ascii_characters + chinese_characters + korean_characters)))
+    alphabet = sorted(
+        list(set(ascii_characters + chinese_characters + korean_characters))
+    )
     reverse_alphabet = {c: i for i, c in enumerate(alphabet)}
     del ascii_characters
     del chinese_characters
@@ -40638,6 +40637,16 @@ class AlphabetAccess:
 
 
 def represent_num_as_base(num, base):
+    """
+    Convert a non-negative integer to a list of digits in the given base.
+
+    Args:
+        num (int): The number to convert.
+        base (int): The base to use.
+
+    Returns:
+        List[int]: The digits of the number in the given base, most significant first.
+    """
     if num == 0:
         return [0]
     digits = []
@@ -40648,8 +40657,16 @@ def represent_num_as_base(num, base):
 
 
 def hexdigest_as_JACK(string):
-    if not string:
-        return
+    """
+    Encode a hexadecimal string as a JACK string using the custom alphabet.
+
+    Args:
+        string (str): A hexadecimal string (e.g., a hash digest).
+
+    Returns:
+        str: The JACK-encoded string.
+    """
+    assert isinstance(string, str)
     return "".join(
         AlphabetAccess.alphabet[c]
         for c in represent_num_as_base(int(string, 16), len(AlphabetAccess.alphabet))
@@ -40657,8 +40674,16 @@ def hexdigest_as_JACK(string):
 
 
 def JACK_as_num(string: str):
-    if isinstance(string, bytes):
-        string = string.decode()
+    """
+    Decode a JACK string back to an integer.
+
+    Args:
+        string (str): The JACK-encoded string.
+
+    Returns:
+        int: The decoded integer value.
+    """
+    assert isinstance(string, str)
     string = "".join(string.split())
     return sum(
         len(AlphabetAccess.reverse_alphabet) ** i * AlphabetAccess.reverse_alphabet[x]
@@ -40667,8 +40692,28 @@ def JACK_as_num(string: str):
 
 
 def num_as_hexdigest(num):
+    """
+    Convert an integer to a zero-padded 64-character hexadecimal string.
+
+    Args:
+        num (int): The integer to convert.
+
+    Returns:
+        str: The zero-padded hexadecimal string.
+    """
+    assert isinstance(num, int)
     return str.rjust(hex(num)[2:], 64, "0")
 
 
 def is_JACK(H):
+    """
+    Check if a string is a valid JACK-encoded string (all characters in the custom alphabet).
+
+    Args:
+        H (str): The string to check.
+
+    Returns:
+        bool: True if the string is JACK-encoded, False otherwise.
+    """
+    assert isinstance(H, str)
     return all(c in AlphabetAccess.alphabet for c in H)
