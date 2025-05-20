@@ -51,7 +51,6 @@ def test_spill_pointer_and_large_valueset(tree):
 
 
 def test_state_mask_ecc(tree):
-    # Insert and delete to exercise state mask transitions
     key = "ecc"
     for i in range(1, 5):
         tree.insert(key, E(i))
@@ -64,6 +63,25 @@ def test_state_mask_ecc(tree):
         if hasattr(tree, "check_and_correct_state_mask"):
             tree.check_and_correct_state_mask(key)
     # TODO: If metrics/logging/tracing APIs are available, check for merge/GC events
+
+    # Spec 2: ECC-protected state mask must correct single-bit errors and detect double-bit errors
+    if hasattr(tree, "get_state_mask"):
+        mask = tree.get_state_mask(key)
+        # Inject single-bit error and check correction
+        if hasattr(tree, "set_state_mask") and hasattr(
+            tree, "check_and_correct_state_mask"
+        ):
+            orig_mask = mask
+            for bit in range(8):
+                corrupted = orig_mask ^ (1 << bit)
+                tree.set_state_mask(key, corrupted)
+                tree.check_and_correct_state_mask(key)
+                assert tree.get_state_mask(key) == orig_mask
+            # Inject double-bit error and check detection (should not correct)
+            corrupted = orig_mask ^ 0b11
+            tree.set_state_mask(key, corrupted)
+            tree.check_and_correct_state_mask(key)
+            assert tree.get_state_mask(key) != orig_mask
 
 
 def test_btree_initialization(tree):

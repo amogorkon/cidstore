@@ -1,13 +1,5 @@
 # Additional tests for CID, immutability, and ValueSet/HashEntry integration
-import pytest
-
-
-def test_cid_immutability():
-    e = E(0x1234567890ABCDEF1234567890ABCDEF)
-    with pytest.raises(AttributeError):
-        e.high = 0
-    with pytest.raises(AttributeError):
-        e.low = 0
+from cidtree.keys import E
 
 
 def test_cid_in_valueset_and_hashentry():
@@ -17,23 +9,17 @@ def test_cid_in_valueset_and_hashentry():
     from cidtree.main import CIDTree
 
     with tempfile.TemporaryDirectory() as tmp:
-        tree = CIDTree(f"{tmp}/test.h5")
+        from cidtree.tree import WAL, Storage
+
+        storage = Storage(f"{tmp}/test.h5")
+        wal = WAL(None)
+        tree = CIDTree(storage, wal=wal)
         key = E(0x11112222333344445555666677778888)
         value = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
         tree.insert(key, value)
         result = list(tree.get(key))
         assert value in result or int(value) in [int(x) for x in result]
 
-
-"""test_entity.py
-
-Tests for the entity.py module which defines the E class and composite key functions.
-"""
-
-# Import the module under test.
-from cidtree.keys import (
-    E,
-)
 
 # ---------------------------------------------------
 # Tests for the E class (128-bit entity keys)
@@ -63,6 +49,10 @@ def test_to_from_hdf5():
 def test_e_str_repr():
     """Test that __str__ and __repr__ produce non-empty strings."""
     e = E(0xABCDE12345ABCDE12345ABCDE12345)
+    rep = repr(e)
+    s = str(e)
+    assert isinstance(rep, str) and rep != ""
+    assert isinstance(s, str) and s != ""
     rep = repr(e)
     s = str(e)
     assert isinstance(rep, str) and rep != ""

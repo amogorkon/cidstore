@@ -7,6 +7,7 @@ import pytest
 from cidtree.keys import E
 from cidtree.storage import Storage
 from cidtree.tree import CIDTree
+from cidtree.wal import WAL
 
 
 def test_standard_workflow(tmp_path):
@@ -15,7 +16,8 @@ def test_standard_workflow(tmp_path):
 
     h5file = Path(tmp_path) / "workflow.h5"
     storage = Storage(path=h5file)
-    tree = CIDTree(storage)
+    wal = WAL(path=":memory:")
+    tree = CIDTree(storage, wal)
 
     # 2. Insert basic keys and values
     k_alpha = E.from_str("alpha")
@@ -65,7 +67,8 @@ def test_wal_recovery(tmp_path):
 
     file = Path(tmp_path) / "walrec.h5"
     storage1 = Storage(path=file)
-    tree1 = CIDTree(storage1)
+    wal = WAL(path=":memory:")
+    tree1 = CIDTree(storage1, wal)
     k = E.from_str("recov")
     tree1.insert(k, E(1))
     if storage1.file:
@@ -73,7 +76,8 @@ def test_wal_recovery(tmp_path):
 
     # Reopen storage and tree -> WAL should replay
     storage2 = Storage(path=file)
-    tree2 = CIDTree(storage2)
+    wal = WAL(path=":memory:")
+    tree2 = CIDTree(storage2, wal)
     assert list(tree2.get(k)) == [E(1)]
 
 
@@ -82,7 +86,8 @@ def test_concurrent_writes(tmp_path):
     from pathlib import Path
 
     storage = Storage(path=Path(tmp_path) / "swmr.h5")
-    tree = CIDTree(storage)
+    wal = WAL(path=":memory:")
+    tree = CIDTree(storage, wal)
 
     def worker(start, results):
         for i in range(start + 1, start + 51):
