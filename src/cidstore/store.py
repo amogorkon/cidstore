@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
-import time
+from collections.abc import Iterable
 from typing import Any
 
-import h5py
 import numpy as np
 
-from .deletion_log import BackgroundGC, DeletionLog
 from .keys import E
 from .storage import Storage
 from .util import encode_state_mask
-from .wal import HASH_ENTRY_DTYPE, WAL
+from .wal import WAL, OpType
 
 
 class CIDStore:
@@ -30,247 +29,57 @@ class CIDStore:
         assert isinstance(hdf, Storage), "hdf must be a Storage"
         self.hdf = hdf
         self.wal = wal
-        self._writer_lock = threading.RLock()
         self.dir: dict[E, int] = {}
-        self._init_hdf5_layout()
+        self._writer_lock = threading.RLock()
+        self.hdf._init_hdf5_layout()
         self._directory_mode = "attr"
         self._directory_dataset = None
         self._directory_attr_threshold = 1000
+        with self.hdf as f:
+            if "/buckets" not in f:
+                f.create_group("/buckets")
         self._bucket_counter = 0
         self._load_directory()
-        self.hdf.apply_insert = self._wal_apply_insert
-        self.hdf.apply_delete = self._wal_apply_delete
         self._wal_consumer_task = asyncio.create_task(self.wal.consume_async(self))
 
-    async def compact(self):
-        await asyncio.to_thread(self._compact_all_sync)
+    async def wal_checkpoint(self):
+        await asyncio.to_thread(self.wal._checkpoint)
+        await asyncio.to_thread(self.hdf.file.flush)
+        await asyncio.to_thread(self.wal.flush)
 
-    def _compact_all_sync(self):
-        assert hasattr(self, "dir")
-        for key in list(self.dir.keys()):
-            self.compact_key(key)
-
-    async def merge(self):
-        await asyncio.to_thread(self.background_maintenance)
-
-    async def gc(self):
-        await asyncio.to_thread(self.run_gc_once)
-
-    async def auto_tune(self, metrics):
-        await asyncio.to_thread(self._auto_tune_sync, metrics)
-
-    def _auto_tune_sync(self, metrics):
-        if not hasattr(self, "_autotune_state"):
-            self._autotune_state = {
-                "batch_size": 64,
-                "flush_interval": 1.0,
-                "error_violations": 0,
-                "latency_violations": 0,
-                "last_latency": None,
-                "integral": 0.0,
-                "prev_error": 0.0,
-            }
-        state = self._autotune_state
-        kp, ki, kd = 0.5, 0.1, 0.3
-        latency_target = 0.0001
-        min_batch, max_batch = 32, 1024
-        latency = metrics.get("latency_p99", 0.0)
-        throughput = metrics.get("throughput_ops", 0.0)
-        error_rate = metrics.get("error_rate", 0.0)
-        buffer_occupancy = metrics.get("buffer_occupancy", 0)
-        error = latency - latency_target
-        state["integral"] += error
-        derivative = error - state["prev_error"]
-        state["prev_error"] = error
-        adjustment = kp * error + ki * state["integral"] + kd * derivative
-        batch_size = state["batch_size"]
-        if error > 0 or error_rate > 0.01:
-            state["latency_violations"] += 1
-        else:
-            state["latency_violations"] = 0
-        if state["latency_violations"] >= 3 or error_rate > 0.05:
-            batch_size = max(min_batch, batch_size // 2)
-            state["latency_violations"] = 0
-        elif adjustment < 0 and buffer_occupancy > 0.8:
-            batch_size = min(max_batch, batch_size + 32)
-        state["batch_size"] = batch_size
-        flush_interval = state["flush_interval"]
-        if error > 0:
-            flush_interval = min(2.0, flush_interval * 1.1)
-        else:
-            flush_interval = max(0.1, flush_interval * 0.95)
-        state["flush_interval"] = flush_interval
-        if latency > 0.00015:
-            state["error_violations"] += 1
-        else:
-            state["error_violations"] = 0
-        if state["error_violations"] >= 5:
-            state["batch_size"] = 64
-            state["flush_interval"] = 1.0
-            state["error_violations"] = 0
-        print(
-            f"[AutoTune] batch_size={state['batch_size']} flush_interval={state['flush_interval']} latency={latency:.6f} throughput={throughput} error_rate={error_rate}"
-        )
-
-    async def batch_insert(self, items: list[tuple[E, E]]) -> None:
-        await asyncio.to_thread(self._batch_insert_sync, items)
-
-    def _batch_insert_sync(self, items: list[tuple[E, E]]):
-        assert all(isinstance(k, E) and isinstance(v, E) for k, v in items)
-        for key, value in items:
-            self.wal.log_insert(key.high, key.low, value.high, value.low)
+    async def batch_insert(self, items: dict[E, Iterable[E]]) -> None:
+        assert all(isinstance(k, E) for k in items)
+        assert all(isinstance(v, E) for values in items.values() for v in values)
+        await self.wal.batch_insert([
+            (key.high, key.low, value.high, value.low)
+            for key, values in items.items()
+            for value in values
+        ])
 
     async def batch_delete(self, keys: list[E]) -> None:
-        await asyncio.to_thread(self._batch_delete_sync, keys)
-
-    def _batch_delete_sync(self, keys: list[E]):
         assert all(isinstance(k, E) for k in keys)
-        for key in keys:
-            self.wal.log_delete(key.high, key.low)
+        await self.wal.batch_delete([(key.high, key.low) for key in keys])
 
     async def insert(self, key: E, value: E) -> None:
-        await asyncio.to_thread(self._insert_sync, key, value)
-
-    def _insert_sync(self, key: E, value: E) -> None:
-        """
-        Insert a key-value pair into the tree.
-        Args:
-            key: Key to insert (E).
-            value: Value to insert (E).
-        Handles multi-value logic (inline/spill, ECC) and WAL logging.
-        Appends to the unsorted region of the bucket; background maintenance merges/sorts.
-        """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict), "dir must be a dict"
-        assert hasattr(self, "buckets"), "buckets attribute must exist"
-        assert hasattr(self, "_writer_lock"), "_writer_lock must exist"
-        assert hasattr(self.hdf, "file") and self.hdf.file is not None, (
-            "file must exist"
-        )
-        assert isinstance(key, E), "Key must be E"
-        assert isinstance(value, E), "Value must be E"
-
-        V = self.get(key)
+        assert isinstance(key, E)
+        assert isinstance(value, E)
+        V = await self.get(key)
         if V and value in V:
             return
-
-        with self._writer_lock:
-            self.wal.log_insert(key.high, key.low, value.high, value.low)
-
-        if key not in self.dir:
-            if not self.buckets:
-                bucket_id: int = self._bucket_counter
-                bucket_name = f"bucket_{bucket_id}"
-                buckets_group = self.hdf.file["/buckets"]
-                if bucket_name in buckets_group:
-                    bucket_ds = buckets_group[bucket_name]
-                else:
-                    bucket_ds: Any = buckets_group.create_dataset(
-                        bucket_name,
-                        shape=(0,),
-                        maxshape=(None,),
-                        dtype=HASH_ENTRY_DTYPE,
-                        chunks=True,
-                        track_times=False,
-                    )
-                    bucket_ds.attrs["sorted_count"] = 0
-                if bucket_name not in self.buckets:
-                    self.buckets[bucket_name] = bucket_ds
-                self._bucket_counter += 1
-                self.dir[key] = bucket_id
-            else:
-                bucket_id: int = self._get_bucket_id(key)
-                bucket_name = f"bucket_{bucket_id}"
-                buckets_group = self.hdf.file["/buckets"]
-                if bucket_name in buckets_group:
-                    bucket_ds = buckets_group[bucket_name]
-                else:
-                    bucket_ds: Any = buckets_group.create_dataset(
-                        bucket_name,
-                        shape=(0,),
-                        maxshape=(None,),
-                        dtype=HASH_ENTRY_DTYPE,
-                        chunks=True,
-                        track_times=False,
-                    )
-                    bucket_ds.attrs["sorted_count"] = 0
-                if bucket_name not in self.buckets:
-                    self.buckets[bucket_name] = bucket_ds
-                self.dir[key] = bucket_id
-            self._save_directory()
-
-        bucket_id = self.dir[key]
-        bucket_name = f"bucket_{bucket_id}"
-        bucket: Any = self.buckets[bucket_name]
-        entry_idx: int | None = None
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                entry_idx = i
-                break
-        if entry_idx is not None:
-            self._add_value_to_bucket_entry(bucket, entry_idx, key, value)
-            return
-        # No existing entry found, create a new one
-        new_entry: Any = np.zeros(1, dtype=bucket.dtype)
-        new_entry[0]["key_high"] = key.high
-        new_entry[0]["key_low"] = key.low
-        new_entry[0]["slots"][0] = int(value)
-        new_entry[0]["state_mask"] = encode_state_mask(1)
-        new_entry[0]["version"] = 1
-        bucket.resize((bucket.shape[0] + 1,))
-        bucket[-1] = new_entry[0]
-        bucket.file.flush()
+        await self.wal.log_insert(key.high, key.low, value.high, value.low)
 
     async def delete(self, key: E) -> None:
-        await asyncio.to_thread(self._delete_sync, key)
-
-    def _delete_sync(self, key: E) -> None:
         """
         Delete a key and all its values.
         Args:
             key: The key to delete (E).
         Removes all values (inline and spill) for the key.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return
-        bucket_name = f"bucket_{bucket_id}"
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            return
-        found_idx = next(
-            (
-                i
-                for i in range(bucket.shape[0])
-                if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low
-            ),
-            None,
-        )
-        if found_idx is None:
-            return
-        bucket[found_idx]["slots"][:] = 0
-        bucket[found_idx]["state_mask"] = 0
-        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-        values_group = self.hdf.file["/values/sp"]
-        if spill_ds_name in values_group:
-            del values_group[spill_ds_name]
-        bucket[found_idx]["version"] += 1
-        bucket.file.flush()
+        await self.wal.log_delete(key.high, key.low)
 
-    async def get(self, key: E):
-        return await asyncio.to_thread(lambda: list(self._get_sync(key)))
-
-    def _get_sync(self, key: E):
-        # Synchronous get logic (copied from original get)
-        if not isinstance(key, E):
-            key = (
-                E.from_str(key)
-                if hasattr(E, "from_str") and isinstance(key, str)
-                else E(int(key))
-            )
+    async def get(self, key: E) -> Iterable[E]:
+        assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
             return iter([])
@@ -299,12 +108,6 @@ class CIDStore:
         Returns:
             dict or None: Entry dict with key, key_high, key_low, slots, state_mask, version, values, value.
         """
-        return await asyncio.to_thread(self._get_entry, key)
-
-    def _get_entry(self, key: E):
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
@@ -320,8 +123,6 @@ class CIDStore:
                     "key_high": int(bucket[i]["key_high"]),
                     "key_low": int(bucket[i]["key_low"]),
                     "slots": bucket[i]["slots"].copy(),
-                    "state_mask": int(bucket[i]["state_mask"]),
-                    "version": int(bucket[i]["version"]),
                 }
                 if bucket[i]["state_mask"] == 0:
                     spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
@@ -339,105 +140,9 @@ class CIDStore:
         return None
 
     async def delete_value(self, key: E, value: E) -> None:
-        await asyncio.to_thread(self._delete_value_sync, key, value)
+        await self.wal.log_delete_value(key.high, key.low, value.high, value.low)
 
-    def _delete_value_sync(self, key: E, value: E) -> None:
-        # For demonstration, just log to WAL (real implementation may differ)
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
-        assert isinstance(key, E)
-        assert isinstance(value, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return
-        bucket_name = f"bucket_{bucket_id}"
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            return
-        found_idx = next(
-            (
-                i
-                for i in range(bucket.shape[0])
-                if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low
-            ),
-            None,
-        )
-        if found_idx is None:
-            return
-        v = int(value)
-        slots = bucket[found_idx]["slots"]
-        for j in range(4):
-            if slots[j] == v:
-                slots[j] = 0
-                break
-        mask = sum(1 << k for k in range(4) if slots[k] != 0)
-        bucket[found_idx]["state_mask"] = encode_state_mask(mask)
-        if bucket[found_idx]["state_mask"] == 0:
-            spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-            values_group = self.hdf.file["/values/sp"]
-            if spill_ds_name in values_group:
-                ds = values_group[spill_ds_name]
-                arr = ds[:]
-                arr[arr == v] = 0
-                ds[:] = arr
-        bucket[found_idx]["version"] += 1
-        bucket.file.flush()
-
-    async def close(self) -> None:
-        if hasattr(self, "_wal_consumer_task"):
-            self._wal_consumer_task.cancel()
-            try:
-                await self._wal_consumer_task
-            except asyncio.CancelledError:
-                pass
-            # Ensure a final WAL flush/checkpoint after cancelling the consumer task
-            await asyncio.to_thread(self._save_wal)
-        await asyncio.to_thread(self._close_sync)
-
-    def _close_sync(self):
-        with self._writer_lock:
-            self._save_directory()
-            self._save_wal()
-            if hasattr(self, "gc_thread") and self.gc_thread:
-                self.gc_thread.stop()
-            if hasattr(self, "file") and self.file:
-                self.file.close()
-            if hasattr(self, "hdf") and self.hdf:
-                self.hdf.close()
-
-    def _init_hdf5_layout(self) -> None:
-        """
-        Ensure all groups, datasets, and attributes match canonical layout (Spec 9).
-        """
-        if self.hdf.file is None:
-            self.hdf.open("a")
-        f = self.hdf.file
-        cfg = f.require_group("/config")
-        cfg.attrs.setdefault("format_version", 1)
-        cfg.attrs.setdefault("created_by", "CIDStore")
-        cfg.attrs.setdefault("swmr", True)
-        cfg.attrs.setdefault("last_opened", int(time.time()))
-        cfg.attrs.setdefault("last_modified", int(time.time()))
-        if "dir" not in cfg.attrs:
-            cfg.attrs["dir"] = "{}"
-        f.attrs.setdefault("cidstore_version", "1.0")
-        f.attrs.setdefault("hdf5_version", h5py.version.hdf5_version)
-        f.attrs.setdefault("swmr", True)
-        if "/values" not in f:
-            f.create_group("/values")
-        if "/values/sp" not in f:
-            f["/values"].create_group("sp")
-        if "/nodes" not in f:
-            f.create_group("/nodes")
-        f.flush()
-        if not hasattr(self, "dir") or not isinstance(self.dir, dict):
-            self.dir = {}
-        self.deletion_log = DeletionLog(f)
-        self.gc_thread = BackgroundGC(self)
-        self.gc_thread.start()
-
-    def _load_directory(self) -> None:
+    async def _load_directory(self) -> None:
         """
         Load directory from HDF5 attributes or canonical dataset (Spec 3).
         """
@@ -469,7 +174,7 @@ class CIDStore:
                 self._directory_mode = "attr"
                 self.dir = {}
 
-    def _save_directory(self) -> None:
+    async def _save_directory(self) -> None:
         """
         Save directory to HDF5 attributes or canonical dataset (Spec 3).
         """
@@ -490,7 +195,7 @@ class CIDStore:
                 ds[i]["version"] = 1
         self.hdf.file.flush()
 
-    def _maybe_migrate_directory(self) -> None:
+    async def _maybe_migrate_directory(self) -> None:
         """
         Migrate directory from attribute to canonical, scalable, sharded/hybrid dataset.
         Only migrates if the directory exceeds the attribute threshold.
@@ -512,8 +217,6 @@ class CIDStore:
         # Hybrid: if >1M buckets, use sharded directory; else, single dataset
         SHARD_THRESHOLD = 1_000_000
         items = list(self.dir.items())
-        if "dir" in f:
-            del f["dir"]
         if len(items) > SHARD_THRESHOLD:
             self._shard_items_into_directory(items, f, dt)
         else:
@@ -540,7 +243,7 @@ class CIDStore:
             f["/config"].attrs.modify("dir", None)
         f.flush()
 
-    def _shard_items_into_directory(self, items, f, dt):
+    async def _shard_items_into_directory(self, items, f, dt):
         SHARD_SIZE = 100_000
         # Sharded directory: /directory/shard_{i}
         num_shards = (len(items) + SHARD_SIZE - 1) // SHARD_SIZE
@@ -570,7 +273,7 @@ class CIDStore:
         self._directory_mode = "sharded"
         self._directory_dataset = dir_group
 
-    def _get_bucket_id(self, key: E) -> int:
+    async def _get_bucket_id(self, key: E) -> int:
         """
         Compute the bucket ID for a given key.
         Args:
@@ -588,11 +291,10 @@ class CIDStore:
         Returns:
             bool: True if the key is in the directory, False otherwise.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
         assert isinstance(key, E)
         return key in self.dir
 
-    def __getitem__(self, key: E) -> E:
+    def __getitem__(self, key: E) -> set[E]:
         """
         Get the value for a key.
         Args:
@@ -602,45 +304,37 @@ class CIDStore:
         Raises:
             KeyError: If the key is not found.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
         assert isinstance(key, E)
-        entry = self.get_entry(key)
+        entry = asyncio.run(self.get(key))
         if entry is not None:
-            return E(entry["value"])
+            return {E(e) for e in entry}
         raise KeyError(f"Key not found: {key}")
 
     def __setitem__(self, key: E, value: E) -> None:
         """
         Set the value for a key.
         Args:
-            key: The key to set (E).
-            value: The value to set (E).
-        If the key already exists, append the value (and possibly spill).
-        If the key does not exist, inserts a new key-value pair.
+            key: The key to set.
+            value: The value to add to the set of values of key.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
         assert isinstance(key, E)
         assert isinstance(value, E)
-        self.insert(key, value)
+        asyncio.run(self.insert(key, value))
 
     def __delitem__(self, key: E) -> None:
         """
         Delete a key.
         Args:
-            key: The key to delete (E).
+            key: The key to delete.
         If the key has multiple values, removes all values (inline and spill).
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
         assert isinstance(key, E)
-        self.delete(key)
+        asyncio.run(self.delete(key))
 
     def valueset_exists(self, key: E) -> bool:
         """
         Check if a value set exists for a key (including spilled sets).
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
@@ -661,9 +355,6 @@ class CIDStore:
         """
         Count tombstones (zeros) in the spill dataset for a key.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
@@ -682,12 +373,10 @@ class CIDStore:
                 return 0
         return 0
 
-    def is_spilled(self, key: E) -> bool:
+    async def is_spilled(self, key: E) -> bool:
         """
         Check if a key has spilled values (i.e., if a spill dataset exists).
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
@@ -696,14 +385,11 @@ class CIDStore:
         values_group = self.hdf.file["/values/sp"]
         return spill_ds_name in values_group
 
-    def demote_if_possible(self, key: E) -> None:
+    async def demote_if_possible(self, key: E) -> None:
         """
         Move spilled values back to inline slots if possible (<=4 values).
         If the spill dataset has <= 4 values, moves them back to inline slots and deletes the spill.
         """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
-        assert hasattr(self, "buckets") and isinstance(self.buckets, dict)
-        assert hasattr(self, "file")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
@@ -729,15 +415,13 @@ class CIDStore:
                             del values_group[spill_ds_name]
                 break
 
-    def run_gc_once(self) -> None:
+    async def gc(self) -> None:
         """
         Run background GC (orphan/tombstone cleanup).
         Compacts all buckets and removes empty spill datasets.
         """
-        # Compact all buckets
         for key in list(self.dir.keys()):
-            self.compact(key)
-        # Remove empty spill datasets
+            await self.compact(key)
         values_group = self.hdf.file["/values/sp"]
         for dsname in list(values_group.keys()):
             ds = values_group[dsname]
@@ -745,14 +429,14 @@ class CIDStore:
                 del values_group[dsname]
         self.hdf.file.flush()
 
-    def background_maintenance(self) -> None:
+    async def maintain(self) -> None:
         """
         Run background merge/sort/compaction for all buckets.
         Merges unsorted regions, merges underfilled buckets, and runs GC.
         """
-        self.background_bucket_maintenance()
-        self._maybe_merge_buckets()
-        self.run_gc_once()
+        await self.background_bucket_maintenance()
+        await self._maybe_merge_buckets()
+        await self.run_gc_once()
 
     def expose_metrics(self) -> list[Any]:
         """
@@ -760,9 +444,6 @@ class CIDStore:
         Returns:
             list: Prometheus metric objects if available, else empty list.
         """
-        # Implementation for exposing metrics to Prometheus
-        # This is highly dependent on the actual monitoring setup and libraries used
-        # For example, using prometheus_client library:
         try:
             from prometheus_client import Gauge, Info
 
@@ -799,7 +480,7 @@ class CIDStore:
             # prometheus_client not available, return empty list
             return []
 
-    def _load_root(self) -> dict[str, Any] | None:
+    async def _load_root(self) -> dict[str, Any] | None:
         """
         Load the root node (if any) from the HDF5 file.
         Returns:
@@ -807,94 +488,26 @@ class CIDStore:
         """
         return dict(self.hdf.file["/root"]) if "/root" in self.hdf.file else None
 
-    def _init_root(self) -> None:
-        """
-        Initialize the root node in the HDF5 file.
-        """
-        if "/root" not in self.hdf.file:
-            self.hdf.file.create_group("/root")
-        # Initialize with empty data
-        self.hdf.file["/root"].attrs["data"] = b""
-        self.hdf.file["/root"].attrs["type"] = b""
-        self.hdf.file["/root"].attrs["size"] = 0
-        self.hdf.file["/root"].attrs["count"] = 0
-        self.hdf.file["/root"].attrs["next"] = 0
-        self.hdf.file["/root"].attrs["prev"] = 0
-        self.hdf.file["/root"].attrs["flags"] = 0
-        self.hdf.file["/root"].attrs["padding"] = b""
-        self.hdf.file["/root"].attrs["checksum"] = 0
-
-    def _wal_replay_txn_start(self) -> None:
-        """
-        WAL replay: transaction start.
-        Begins a new transaction (no-op in current implementation).
-        """
-        pass
-
-    def _wal_replay_txn_commit(self) -> None:
-        """
-        WAL replay: transaction commit.
-        Commits the current transaction (no-op in current implementation).
-        """
-        pass
-
-    def _wal_replay(self) -> None:
-        """
-        WAL replay: replay the WAL for recovery.
-        Replays all operations in the WAL to restore the state of the tree.
-        """
-        if self.wal:
-            self.wal.replay()
-
     def _wal_apply(self, op: dict[str, Any]) -> None:
         """
         Apply a single WAL operation.
         Args:
             op: WAL operation dict.
-        Supported op types:
-        - 1: Insert
-        - 2: Delete
-        - 3: Transaction start (no-op)
-        - 4: Transaction commit (no-op)
         """
         match op["op_type"]:
-            case 1:
+            case OpType.INSERT.value:
                 key = E(op["key_high"], op["key_low"])
                 value = E(op["value_high"], op["value_low"])
                 self._wal_replay_insert(key, value)
-            case 2:
+            case OpType.DELETE.value:
                 key = E(op["key_high"], op["key_low"])
                 self._wal_replay_delete(key)
-            case 3:
+            case OpType.TXN_START.value:
                 self._wal_replay_txn_start()
-            case 4:
+            case OpType.TXN_COMMIT.value:
                 self._wal_replay_txn_commit()
 
-    def _load_wal(self) -> None:
-        """
-        Load and apply the WAL.
-        Reads the WAL file, replays the operations, and applies them to the tree.
-        """
-        if self.wal:
-            self.wal.load()
-
-    def _save_wal(self) -> None:
-        """
-        Save the current state to the WAL.
-        Writes the current state of the tree to the WAL for recovery.
-        """
-        if self.wal:
-            self.wal.save()
-
-    def _close_wal(self) -> None:
-        """
-        Close the WAL.
-        Finalizes and closes the WAL file.
-        """
-        if self.wal:
-            self.wal.close()
-
-    def __enter__(self) -> "CIDStore":
+    def __enter__(self) -> CIDStore:
         """
         Enter the runtime context related to this object.
         Returns:
@@ -907,7 +520,7 @@ class CIDStore:
         Exit the runtime context related to this object.
         Closes the CIDStore instance.
         """
-        self.close()
+        asyncio.run(self.close())
 
     def __repr__(self) -> str:
         """
@@ -932,10 +545,10 @@ class CIDStore:
             str: String representation of the entire tree.
         """
         output = [f"CIDStore debug dump (buckets={len(self.buckets)})"]
-        output.extend(self._debug_dump_bucket(bucket_id) for bucket_id in self.buckets)
+        output.extend(self.debug_dump_bucket(bucket_id) for bucket_id in self.buckets)
         return "\n".join(output)
 
-    def _debug_dump_bucket(self, bucket_id: int) -> str:
+    def debug_dump_bucket(self, bucket_id: int) -> str:
         """
         Debug: Dump the contents of a bucket.
         Args:
@@ -1000,3 +613,70 @@ class CIDStore:
                 ds.resize((ds.shape[0] + 1,))
                 ds[-1] = int(value)
         bucket[entry_idx]["state_mask"] = 0
+
+    async def _auto_tune(self, metrics):
+        if not hasattr(self, "_autotune_state"):
+            self._autotune_state = {
+                "batch_size": 64,
+                "flush_interval": 1.0,
+                "error_violations": 0,
+                "latency_violations": 0,
+                "last_latency": None,
+                "integral": 0.0,
+                "prev_error": 0.0,
+            }
+        state = self._autotune_state
+        kp, ki, kd = 0.5, 0.1, 0.3
+        latency_target = 0.0001
+        min_batch, max_batch = 32, 1024
+        latency = metrics.get("latency_p99", 0.0)
+        throughput = metrics.get("throughput_ops", 0.0)
+        error_rate = metrics.get("error_rate", 0.0)
+        buffer_occupancy = metrics.get("buffer_occupancy", 0)
+        error = latency - latency_target
+        state["integral"] += error
+        derivative = error - state["prev_error"]
+        state["prev_error"] = error
+        adjustment = kp * error + ki * state["integral"] + kd * derivative
+        batch_size = state["batch_size"]
+        if error > 0 or error_rate > 0.01:
+            state["latency_violations"] += 1
+        else:
+            state["latency_violations"] = 0
+        if state["latency_violations"] >= 3 or error_rate > 0.05:
+            batch_size = max(min_batch, batch_size // 2)
+            state["latency_violations"] = 0
+        elif adjustment < 0 and buffer_occupancy > 0.8:
+            batch_size = min(max_batch, batch_size + 32)
+        state["batch_size"] = batch_size
+        flush_interval = state["flush_interval"]
+        if error > 0:
+            flush_interval = min(2.0, flush_interval * 1.1)
+        else:
+            flush_interval = max(0.1, flush_interval * 0.95)
+        state["flush_interval"] = flush_interval
+        if latency > 0.00015:
+            state["error_violations"] += 1
+        else:
+            state["error_violations"] = 0
+        if state["error_violations"] >= 5:
+            state["batch_size"] = 64
+            state["flush_interval"] = 1.0
+            state["error_violations"] = 0
+        print(
+            f"[AutoTune] batch_size={state['batch_size']} flush_interval={state['flush_interval']} latency={latency:.6f} throughput={throughput} error_rate={error_rate}"
+        )
+
+    async def close(self):
+        self._wal_consumer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._wal_consumer_task
+        with self._writer_lock:
+            await self._save_directory()
+            await self._save_wal()
+            if hasattr(self, "gc_thread") and self.gc_thread:
+                self.gc_thread.stop()
+            if hasattr(self, "file") and self.file:
+                await asyncio.to_thread(self.file.close)
+            if hasattr(self, "hdf") and self.hdf:
+                await asyncio.to_thread(self.hdf.close)

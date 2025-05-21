@@ -115,7 +115,6 @@ class WAL:
             store: The CIDStore instance (must have an async _wal_apply method or use asyncio.to_thread).
             poll_interval: Time in seconds to wait between polling for new records.
         """
-        last_tail = self._get_tail()
         while True:
             await asyncio.sleep(poll_interval)
             with self._lock:
@@ -379,12 +378,11 @@ class WAL:
             "checksum": stored_checksum,
         }
 
-    def append(self, records: list[dict[str, Any]]) -> None:
+    async def append(self, records: list[dict[str, Any]]) -> None:
         assert isinstance(records, list), "records must be a list"
         if not records:
             return
-        with self._lock:
-            self._check_and_append_wal_records(records)
+        await asyncio.to_thread(self._check_and_append_wal_records, records)
 
     def _check_and_append_wal_records(self, records):
         head = self._get_head()
@@ -528,14 +526,10 @@ class WAL:
         key_low,
         value_high,
         value_low,
-        *,
-        version_override=None,
     ):
-        # Allow explicit version override for schema evolution testing
-        v = version if version_override is None else version_override
-        assert isinstance(op_type, OpType)
-        op_val = op_type.value
-        version_op = ((v & 0x03) << 6) | (op_val & 0x3F)
+        ver = int(version.value)
+        op = int(op_type.value)
+        version_op = ((ver & 0x03) << 6) | (op & 0x3F)
         nanos, seq, shard = time
         reserved = 0
         record = {
@@ -579,18 +573,16 @@ class WAL:
         self._wal_seq += 1
         return nanos, self._wal_seq, self.shard_id
 
-    def log_insert(self, key_high, key_low, value_high, value_low, time=None):
+    async def log_insert(self, key_high, key_low, value_high, value_low, time=None):
         """
         Append a TXN_START, INSERT, TXN_COMMIT batch for a single insert.
         """
         if time is None:
             time = self._next_hybrid_time()
-        self.append([
+        await self.append([
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_START, time, 0, 0, 0, 0),
             self.wal_record(
-                OpVersion.CURRENT.value, OpType.TXN_START, time, 0, 0, 0, 0
-            ),
-            self.wal_record(
-                OpVersion.CURRENT.value,
+                OpVersion.CURRENT,
                 OpType.INSERT,
                 time,
                 key_high,
@@ -598,7 +590,133 @@ class WAL:
                 value_high,
                 value_low,
             ),
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+        ])
+
+    def flush(self) -> None:
+        """
+        Flush the WAL memory-mapped file to disk.
+        """
+        with self._lock:
+            if self._mmap is not None:
+                self._mmap.flush()
+                logger.debug("WAL flushed to disk.")
+
+    def _checkpoint(self) -> None:
+        """
+        Perform a checkpoint operation on the WAL.
+        This typically means truncating the WAL up to the current head position (all operations up to this point are considered durable).
+        """
+        with self._lock:
+            head = self._get_head()
+            self._set_tail(head)
+            self.flush()
+            logger.info(f"WAL checkpoint: truncated up to head {head}.")
+            if PROMETHEUS_AVAILABLE:
+                wal_tail_position.set(head)
+                wal_records_in_buffer.set(0)
+
+    async def batch_insert(self, items: list[tuple[int, int, int, int]]) -> None:
+        """
+        Atomically log a batch of inserts as a single WAL transaction (TXN_START, multiple INSERT, TXN_COMMIT).
+        Each item is a tuple: (key_high, key_low, value_high, value_low)
+        """
+        if not items:
+            return
+        time_tuple = self._next_hybrid_time()
+        records = [
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_START, time_tuple, 0, 0, 0, 0)
+        ]
+        records.extend(
             self.wal_record(
-                OpVersion.CURRENT.value, OpType.TXN_COMMIT, time, 0, 0, 0, 0
+                OpVersion.CURRENT,
+                OpType.INSERT,
+                time_tuple,
+                key_high,
+                key_low,
+                value_high,
+                value_low,
+            )
+            for key_high, key_low, value_high, value_low in items
+        )
+        records.append(
+            self.wal_record(
+                OpVersion.CURRENT, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0
+            )
+        )
+        await self.append(records)
+
+    async def batch_delete(self, items: list[tuple[int, int]]) -> None:
+        """
+        Atomically log a batch of deletes as a single WAL transaction (TXN_START, multiple DELETE, TXN_COMMIT).
+        Each item is a tuple: (key_high, key_low)
+        """
+        if not items:
+            return
+        time_tuple = self._next_hybrid_time()
+        records = [
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_START, time_tuple, 0, 0, 0, 0)
+        ]
+        records.extend(
+            self.wal_record(
+                OpVersion.CURRENT,
+                OpType.DELETE,
+                time_tuple,
+                key_high,
+                key_low,
+                0,
+                0,
+            )
+            for key_high, key_low in items
+        )
+        records.append(
+            self.wal_record(
+                OpVersion.CURRENT, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0
+            )
+        )
+        await self.append(records)
+
+    async def log_delete(self, key_high, key_low, time=None):
+        """
+        Append a TXN_START, DELETE, TXN_COMMIT batch for a single delete.
+        """
+        if time is None:
+            time = self._next_hybrid_time()
+        await self.append([
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_START, time, 0, 0, 0, 0),
+            self.wal_record(
+                OpVersion.CURRENT,
+                OpType.DELETE,
+                time,
+                key_high,
+                key_low,
+                0,
+                0,
             ),
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+        ])
+
+    async def log_delete_value(
+        self, key_high, key_low, value_high, value_low, time=None
+    ):
+        """
+        Log the deletion of a specific value from a valueset as a WAL transaction.
+        Args:
+            key_high, key_low: The key to delete from.
+            value_high, value_low: The value to delete.
+        """
+        if time is None:
+            time = self._next_hybrid_time()
+        await self.append([
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_START, time, 0, 0, 0, 0),
+            self.wal_record(
+                OpVersion.CURRENT,
+                OpType.DELETE,
+                time,
+                key_high,
+                key_low,
+                value_high,
+                value_low,
+            ),
+            self.wal_record(OpVersion.CURRENT, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
         ])

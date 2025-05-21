@@ -1,7 +1,7 @@
 """WIP tests."""
 
+import asyncio
 import inspect
-import io
 
 # ===========================================
 from cidstore.keys import E
@@ -11,17 +11,19 @@ from cidstore.wal import WAL
 
 
 async def test_standard_workflow():
-    storage = Storage(path=io.BytesIO())
+    storage = Storage(None)
     wal = WAL(None)
     tree = CIDStore(storage, wal)
 
-    k_multi = E.from_str("multi")
-    await tree.insert(k_multi, E(1))
-    for i in range(1, 151):
-        v = E(i)
-        await tree.insert(k_multi, v)
-    values = await tree.get(k_multi)
-    assert values == [E(i) for i in range(1, 151)]
+    k = E.from_str("multi")
+    await tree.insert(k, E(1))
+    print(await tree.get(k))
+    await tree.insert(k, E(2))
+    print(await tree.get(k))
+    await tree.insert(k, E(3))
+    print(await tree.get(k))
+    values = await list(tree.get(k))
+    assert values == [E(1), E(2), E(3)]
 
     tree.hdf.close()
     storage.close()
@@ -29,11 +31,15 @@ async def test_standard_workflow():
 
 # ===========================================
 
+
 if __name__ == "__main__":
     for name, func in globals().copy().items():
         if name.startswith("test_"):
             print(f" ↓↓↓↓↓↓↓ {name} ↓↓↓↓↓↓")
             print(inspect.getsource(func))
-            func()
+            if inspect.iscoroutinefunction(func):
+                asyncio.run(func())
+            else:
+                func()
             print(f"↑↑↑↑↑↑ {name} ↑↑↑↑↑↑")
             print()

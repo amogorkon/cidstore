@@ -19,6 +19,8 @@ class Storage:
         Accepts a string path, pathlib.Path, or an io.BytesIO object for in-memory operation.
         """
         self.path: str | Path | io.BytesIO | None = path
+        if not path:
+            self.path = io.BytesIO()
         self.file: h5py.File | None = None
         self.open("a")
 
@@ -149,29 +151,6 @@ class Storage:
     # call through to tree.insert/tree.delete).
     # ----------------------------------------------------------------
 
-    def apply_insert(self, key: E, value: E) -> None:
-        """
-        Apply a low-level insert during WAL replay.
-        By default, this is a stub; bind it to your BPlusTree.insert().
-        """
-        assert isinstance(key, E), "key must be E"
-        assert isinstance(value, E), "value must be E"
-        raise NotImplementedError(
-            "StorageManager.apply_insert() not bound; "
-            "bind to BPlusTree.insert for WAL replay."
-        )
-
-    def apply_delete(self, key: E) -> None:
-        """
-        Apply a low-level delete during WAL replay.
-        By default, this is a stub; bind it to your BPlusTree.delete().
-        """
-        assert isinstance(key, E), "key must be E"
-        raise NotImplementedError(
-            "StorageManager.apply_delete() not bound; "
-            "bind to BPlusTree.delete for WAL replay."
-        )
-
     @property
     def buckets(self):
         """
@@ -181,3 +160,158 @@ class Storage:
         if self.file is None:
             self.open("a")
         return self.file["/buckets"]
+
+    def _apply_insert(self, key: E, value: E, skip_wal: bool = False) -> None:
+        """
+        Insert a key-value pair into the tree.
+        Args:
+            key: Key to insert (E).
+            value: Value to insert (E).
+        Handles multi-value logic (inline/spill, ECC) and WAL logging.
+        Appends to the unsorted region of the bucket; background maintenance merges/sorts.
+        """
+
+        with self._writer_lock:
+            if not skip_wal:
+                # Only log to WAL if not already done in async insert
+                self.wal.log_insert(key.high, key.low, value.high, value.low)
+
+        if key not in self.dir:
+            if not self.buckets:
+                bucket_id: int = self._bucket_counter
+                bucket_name = f"bucket_{bucket_id}"
+                buckets_group = self.hdf.file["/buckets"]
+                if bucket_name in buckets_group:
+                    bucket_ds = buckets_group[bucket_name]
+                else:
+                    bucket_ds: Any = buckets_group.create_dataset(
+                        bucket_name,
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=HASH_ENTRY_DTYPE,
+                        chunks=True,
+                        track_times=False,
+                    )
+                    bucket_ds.attrs["sorted_count"] = 0
+                if bucket_name not in self.buckets:
+                    self.buckets[bucket_name] = bucket_ds
+                self._bucket_counter += 1
+                self.dir[key] = bucket_id
+            else:
+                bucket_id: int = self._get_bucket_id(key)
+                bucket_name = f"bucket_{bucket_id}"
+                buckets_group = self.hdf.file["/buckets"]
+                if bucket_name in buckets_group:
+                    bucket_ds = buckets_group[bucket_name]
+                else:
+                    bucket_ds: Any = buckets_group.create_dataset(
+                        bucket_name,
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=HASH_ENTRY_DTYPE,
+                        chunks=True,
+                        track_times=False,
+                    )
+                    bucket_ds.attrs["sorted_count"] = 0
+                if bucket_name not in self.buckets:
+                    self.buckets[bucket_name] = bucket_ds
+                self.dir[key] = bucket_id
+            self._save_directory()
+
+        bucket_id = self.dir[key]
+        bucket_name = f"bucket_{bucket_id}"
+        bucket: Any = self.buckets[bucket_name]
+        entry_idx: int | None = None
+        for i in range(bucket.shape[0]):
+            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
+                entry_idx = i
+                break
+        if entry_idx is not None:
+            self._add_value_to_bucket_entry(bucket, entry_idx, key, value)
+            return
+        # No existing entry found, create a new one
+        new_entry: Any = np.zeros(1, dtype=bucket.dtype)
+        new_entry[0]["key_high"] = key.high
+        new_entry[0]["key_low"] = key.low
+        new_entry[0]["slots"][0] = int(value)
+        new_entry[0]["state_mask"] = encode_state_mask(1)
+        new_entry[0]["version"] = 1
+        bucket.resize((bucket.shape[0] + 1,))
+        bucket[-1] = new_entry[0]
+        bucket.file.flush()
+
+    def _apply_delete(self, key: E) -> None:
+        assert isinstance(key, E)
+        bucket_id = self.dir.get(key)
+        if bucket_id is None:
+            return
+        bucket_name = f"bucket_{bucket_id}"
+        bucket = self.buckets.get(bucket_name)
+        if bucket is None:
+            return
+        found_idx = next(
+            (
+                i
+                for i in range(bucket.shape[0])
+                if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low
+            ),
+            None,
+        )
+        if found_idx is None:
+            return
+        bucket[found_idx]["slots"][:] = 0
+        bucket[found_idx]["state_mask"] = 0
+        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
+        values_group = self.hdf.file["/values/sp"]
+        if spill_ds_name in values_group:
+            del values_group[spill_ds_name]
+        bucket[found_idx]["version"] += 1
+        bucket.file.flush()
+
+    def _init_root(self) -> None:
+        """
+        Initialize the root node in the HDF5 file.
+        """
+        if "/root" not in self.hdf.file:
+            self.hdf.file.create_group("/root")
+        # Initialize with empty data
+        self.hdf.file["/root"].attrs["data"] = b""
+        self.hdf.file["/root"].attrs["type"] = b""
+        self.hdf.file["/root"].attrs["size"] = 0
+        self.hdf.file["/root"].attrs["count"] = 0
+        self.hdf.file["/root"].attrs["next"] = 0
+        self.hdf.file["/root"].attrs["prev"] = 0
+        self.hdf.file["/root"].attrs["flags"] = 0
+        self.hdf.file["/root"].attrs["padding"] = b""
+        self.hdf.file["/root"].attrs["checksum"] = 0
+
+    def _init_hdf5_layout(self) -> None:
+        """
+        Ensure all groups, datasets, and attributes match canonical layout (Spec 9).
+        """
+        if self.hdf.file is None:
+            self.hdf.open("a")
+        f = self.hdf.file
+        cfg = f.require_group("/config")
+        cfg.attrs.setdefault("format_version", 1)
+        cfg.attrs.setdefault("created_by", "CIDStore")
+        cfg.attrs.setdefault("swmr", True)
+        cfg.attrs.setdefault("last_opened", int(time.time()))
+        cfg.attrs.setdefault("last_modified", int(time.time()))
+        if "dir" not in cfg.attrs:
+            cfg.attrs["dir"] = "{}"
+        f.attrs.setdefault("cidstore_version", "1.0")
+        f.attrs.setdefault("hdf5_version", h5py.version.hdf5_version)
+        f.attrs.setdefault("swmr", True)
+        if "/values" not in f:
+            f.create_group("/values")
+        if "/values/sp" not in f:
+            f["/values"].create_group("sp")
+        if "/nodes" not in f:
+            f.create_group("/nodes")
+        f.flush()
+        if not hasattr(self, "dir") or not isinstance(self.dir, dict):
+            self.dir = {}
+        self.deletion_log = DeletionLog(f)
+        self.gc_thread = BackgroundGC(self)
+        self.gc_thread.start()
