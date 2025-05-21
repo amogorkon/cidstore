@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cidstore-rest
+  namespace: cidtree
+spec:
+  selector:
+    app: cidstore-writer
+  ports:
+    - name: rest
+      port: 8000
+      targetPort: 8000
+    - name: zmq-push
+      port: 5557
+      targetPort: 5557
+    - name: zmq-router
+      port: 5558
+      targetPort: 5558
+    - name: zmq-pub
+      port: 5559
+      targetPort: 5559
+  type: ClusterIP

@@ -3,13 +3,13 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cidtree"
+name = "cidstore"
 version = "0.1.0"
 description = "A high-performance, disk-backed B+Tree implementation for triplestores only working with CIDs."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Anselm Kiefner", email = "cidtree-github@anselm.kiefner.de" }
+    { name = "Anselm Kiefner", email = "cidstore-github@anselm.kiefner.de" }
 ]
 requires-python = ">=3.12"
 classifiers = [
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/amogorkon/cidtree"
+Homepage = "https://github.com/amogorkon/cidstore"
 
 [tool.setuptools]
 packages = { find = { where = ["src"] } }

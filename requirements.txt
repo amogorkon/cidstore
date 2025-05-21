@@ -5,3 +5,7 @@ crc32c==2.7.1
 filelock
 prometheus_client
 pytest
+fastapi
+uvicorn
+msgpack
+pyzmq

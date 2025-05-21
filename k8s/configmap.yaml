@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cidstore-config
+  namespace: cidtree
+
+data:
+  PROMOTION_THRESHOLD: "128"
+  BATCH_SIZE: "64"
+  # Add other config as needed

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cidstore-read
+  labels:
+    app: cidstore
+    role: read
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cidstore
+      role: read
+  template:
+    metadata:
+      labels:
+        app: cidstore
+        role: read
+    spec:
+      containers:
+      - name: cidstore
+        image: cidstore:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+        - containerPort: 5557
+        envFrom:
+        - configMapRef:
+            name: cidstore-config
