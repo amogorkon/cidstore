@@ -1,7 +1,7 @@
 # AI Query
 
 * Current code. Python 3.12 only, no backwards compatibility.
-* I will post 10 spec parts each as their own message. Understand and acknowledge only, don't suggest anything.
+* `I will post 10 spec parts each as their own message. Understand and acknowledge only, don't suggest anything.`
 * `Now that I have posted everything, let's start. Here is what I need help with:`
 
 

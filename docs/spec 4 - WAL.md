@@ -79,6 +79,22 @@ See Spec 2 for the full schema. Each record includes:
 - Checksum
 - Padding to 64 bytes
 
+### WAL Opcode Meanings
+
+The 6-bit opcode field in each WAL record encodes the type of operation. The following opcodes are defined:
+
+| Opcode Name | Value | Description |
+|-------------|-------|-------------|
+| INSERT      |   1   | Insert a key-value pair into the tree. |
+| DELETE      |   2   | Delete a key (and all its values) from the tree. |
+| TXN_START   |   3   | Begin a transaction (used for grouping operations atomically). |
+| TXN_COMMIT  |   4   | Commit a transaction (finalize all grouped operations). |
+| TXN_ABORT   |   5   | Abort a transaction (rollback grouped operations; not always used). |
+
+Opcodes are extensible; values 6–63 are reserved for future use (e.g., split, merge, schema migration, etc.).
+
+The opcode is packed into the lower 6 bits of the `version_op` field, with the upper 2 bits used for the rolling version (see section 4.7).
+
 All fields are fixed‑width and padded to 64 bytes.
 
 ## 4.4 Locking & SWMR Compliance

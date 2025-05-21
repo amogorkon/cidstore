@@ -16,18 +16,12 @@ classDiagram
     }
     class HashEntry {
         +key: CID
-        +slots: CID[4] or SpillPointer
-        +state_mask: StateMask
-    }
-    class StateMask {
-        +state: uint4
-        +ecc: uint4
+        +slots: CID[2] or SpillPointer
+        +checksum: uint128
     }
 
     class SpillPointer {
-        +ref: uint64 "HDF5 object reference as slots[0].low, ValueSet"
-        +sorted_count: uint32 "as slots[1].low"
-        +checksum: uint128 "as slots[3]"
+        +ref: uint64 "HDF5 object reference as slots[0].high, ValueSet"
     }
 
     class ValueSet {
@@ -80,13 +74,12 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 | Component         | Structure / dtype fields                                      | Size   | Description                                                      |
 |-------------------|--------------------------------------------------------------|--------|------------------------------------------------------------------|
 | Key               | `[high: u64, low: u64]`                                      | 16B    | 128-bit immutable identifier (SHA3 or composite hash)            |
-| Hash Entry        | `[key_high: u64, key_low: u64, value_group: S8, value_start: u32, value_count: u32]` | 32B    | Maps key to value set in bucket; value_group is 8-byte ID        |
-| Value Set         | `[CID[] values, tombstone_count: u32]`                       | Var    | External dataset for high-cardinality keys; tombstone for GC     |
-| Spill Pointer     | `[shard_id: u16, bucket_local: u32, segment_id: u16]`        | 8B     | Points to external value-list location (spill mode)              |
-| State Mask        | `u8` (ECC-encoded 4-bit mask; 4 bits used, 4 ECC)            | 1B     | Encodes entry state (inline/spill/tombstone); ECC-protected, SIMD-friendly |
+| Hash Entry        | `[key_high: u64, key_low: u64, slots: [CID, CID] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. No state mask. |
+| Value Set         | `[CID[] values, sorted_count: u32, tombstone_count: u32]`    | Var    | External dataset for high-cardinality keys; tombstone for GC     |
+| Spill Pointer     | `[ref: u64]`                                                 | 8B     | HDF5 object reference to external ValueSet (spill mode)          |
 | Deletion Record   | `[key_high: u64, key_low: u64, value_group: S8, timestamp: u64]` | 32B    | Tracks obsolete keys for GC; timestamp is Unix ns                |
 | Directory         | `[Bucket[] buckets, num_buckets: u32]`                        | Var    | Array of buckets, stored as HDF5 datasets                        |
-| Bucket            | `[HashEntry[] entries, sorted_count: u32, SpillPointer? spill]`| Var    | Bucket with sorted and unsorted regions; `sorted_count` tracks the number of entries in the sorted region (enabling fast binary search), while new inserts are appended to the unsorted region. Optional spill pointer for external value-lists. |
+| Bucket            | `[HashEntry[] entries, sorted_count: u32]`                    | Var    | Bucket with sorted and unsorted regions; `sorted_count` tracks the number of entries in the sorted region (enabling fast binary search), while new inserts are appended to the unsorted region. |
 
 ## sorted_count Purpose
 - The `sorted_count` field in the either Bucket and ValueSet structure is used to track the number of entries in the sorted region. This allows for efficient binary search operations on the sorted entries, while new inserts are appended to the unsorted region.
@@ -98,12 +91,111 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 
 ## 2.3 Metadata & Constraints
 
-- All fields are fixed-width for O(1) access
-- No variable-length fields; value_group is 8 bytes
+
+- All fields are fixed-width for O(1) access (except ValueSet.values, which is a fixed-type array)
+- No variable-length fields; all pointers are explicit (SpillPointer is a 64-bit HDF5 object reference)
 - Keys and value pointers are immutable after insertion
 - SWMR metadata stored as HDF5 attributes under `/config`
 
 ### State Mask (ECC-encoded)
-- The `State Mask` is a compact, ECC-protected 4-bit field (stored as a single byte) used to encode the state of each hash entry (e.g., inline/spill mode, tombstone, etc.).
-- Error-correcting code (ECC) ensures resilience to bit-flips and supports SIMD-friendly operations.
-- For detailed encoding and usage, see [Spec 5: Multi-Value Keys](spec%205%20-%20Multi-Value%20Keys.md#state-mask-ecc).
+
+### SpillPointer and Promotion
+- The presence of a SpillPointer in a HashEntry indicates that the values for the key are stored externally in a ValueSet dataset.
+- When a key has more than two values, the entry is promoted to spill mode and a SpillPointer is used.
+- Demotion is possible if the value count drops to two or fewer.
+
+## 2.4 Network Message Schema (msgpack via zmq)
+
+**Note:** The UML diagram below is the authoritative source for all network message layouts.
+
+```mermaid
+classDiagram
+    class BaseMessage {
+        +rolling_version: uint2
+        +op_code: Operation
+        +request_id: string
+    }
+    class InsertMessage {
+        +key: CID
+        +value: CID
+    }
+    class DeleteMessage {
+        +key: CID
+        +value: CID (optional)
+    }
+    class BatchInsertMessage {
+        +entries: InsertMessage[]
+    }
+    class BatchDeleteMessage {
+        +entries: DeleteMessage[]
+    }
+    class LookupMessage {
+        +key: CID
+    }
+    class MetricsMessage {
+        <<no additional fields>>
+    }
+    class LookupResponse {
+        +results: CID[]
+    }
+    class MetricsResponse {
+        +latency_p99: float
+        +throughput_ops: float
+        +buffer_occupancy: int
+        +flush_duration: float
+        +lock_contention_ratio: float
+        +error_rate: float
+    }
+    class ErrorResponse {
+        +error_code: int
+        +error_msg: string
+    }
+    class CID {
+        +high: uint64
+        +low: uint64
+    }
+    InsertMessage ..|> BaseMessage
+    DeleteMessage ..|> BaseMessage
+    BatchInsertMessage ..|> BaseMessage
+    BatchDeleteMessage ..|> BaseMessage
+    LookupMessage ..|> BaseMessage
+    MetricsMessage ..|> BaseMessage
+```
+
+---
+
+### Network Message Type Definitions
+
+| Message Type         | Fields / dtype fields                                                                 | Description                                                                 |
+|----------------------|--------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
+| BaseMessage          | `[rolling_version: uint2, op_code: Operation, request_id: string]`                   | All messages include a 2-bit rolling version, operation code, and request id|
+| InsertMessage        | `[key: CID, value: CID]`                                                             | Insert a single value for a key                                              |
+| DeleteMessage        | `[key: CID, value: CID (optional)]`                                                  | Delete a value for a key (or all values if value omitted)                    |
+| BatchInsertMessage   | `[entries: InsertMessage[]]`                                                         | Batch insert of multiple key-value pairs                                     |
+| BatchDeleteMessage   | `[entries: DeleteMessage[]]`                                                         | Batch delete of multiple key-value pairs                                     |
+| LookupMessage        | `[key: CID]`                                                                         | Lookup all values for a key                                                  |
+| MetricsMessage       | `[]`                                                                                 | Request server metrics                                                       |
+| LookupResponse       | `[results: CID[]]`                                                                   | Response to a lookup, contains all values                                    |
+| MetricsResponse      | `[latency_p99: float, throughput_ops: float, buffer_occupancy: int, flush_duration: float, lock_contention_ratio: float, error_rate: float]` | Server metrics response                                                      |
+| ErrorResponse        | `[error_code: int, error_msg: string]`                                               | Standardized error response                                                  |
+
+**Operation Enum Values:**
+
+| Value                | Description                                      |
+|----------------------|--------------------------------------------------|
+| INSERT               | Insert a single value for a key                  |
+| DELETE_KEY           | Delete all values for a key                      |
+| DELETE_VALUE_FROM_KEY| Delete a specific value from a key               |
+| BATCH_INSERT         | Insert multiple key-value pairs in a batch       |
+| BATCH_DELETE         | Delete multiple key-value pairs in a batch       |
+| GET                  | Get all values for a given key                   |
+| METRICS              | Request server metrics                           |
+
+**CID Structure:**
+
+| Field | Type    | Description         |
+|-------|---------|---------------------|
+| high  | uint64  | High 64 bits of CID |
+| low   | uint64  | Low 64 bits of CID  |
+
+---
