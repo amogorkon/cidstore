@@ -1,6 +1,6 @@
-# CIDTree
+# CIDStore
 
-CIDTree is a high-performance, disk-backed B+Tree implementation designed as a backend for triplestores. It efficiently maps 128-bit composite keys to variable-sized sets of 128-bit values, supporting massive-scale many-to-many relationships with high throughput and low latency.
+CIDStore is a high-performance, disk-backed B+Tree implementation designed as a backend for triplestores. It efficiently maps 128-bit composite keys to variable-sized sets of 128-bit values, supporting massive-scale many-to-many relationships with high throughput and low latency.
 
 ## Features
 
@@ -22,7 +22,7 @@ CIDTree is a high-performance, disk-backed B+Tree implementation designed as a b
 
 ## Use Cases
 
-CIDTree is ideal for triplestore backends requiring:
+CIDStore is ideal for triplestore backends requiring:
 
 - Massive-scale many-to-many relationships.
 - High insert throughput and low-latency lookups.
@@ -30,7 +30,7 @@ CIDTree is ideal for triplestore backends requiring:
 
 ## Architecture Overview
 
-CIDTree uses a B+Tree structure with the following components:
+CIDStore uses a B+Tree structure with the following components:
 
 - **Leaf Nodes**: Store semantic keys and values, linked for in-order traversal.
 - **Internal Nodes**: Guide traversal using synthetic routing keys.
@@ -39,7 +39,7 @@ CIDTree uses a B+Tree structure with the following components:
 
 ## Multi-Value Key Handling
 
-CIDTree supports two approaches for multi-value keys:
+CIDStore supports two approaches for multi-value keys:
 
 1. **Duplicate Keys**: Stores multiple entries with the same key directly in the B+Tree.
 2. **Value Lists**: Promotes high-cardinality keys to external HDF5 datasets for efficient bulk operations.
@@ -73,8 +73,8 @@ Clone the repository and install the required dependencies:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/cidtree.git
-cd cidtree
+git clone https://github.com/your-repo/cidstore.git
+cd cidstore
 
 # Install dependencies
 pip install -r requirements.txt
