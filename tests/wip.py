@@ -4,23 +4,23 @@ import inspect
 import io
 
 # ===========================================
-from cidtree.keys import E
-from cidtree.storage import Storage
-from cidtree.tree import CIDTree
-from cidtree.wal import WAL
+from cidstore.keys import E
+from cidstore.storage import Storage
+from cidstore.store import CIDStore
+from cidstore.wal import WAL
 
 
-def test_standard_workflow():
+async def test_standard_workflow():
     storage = Storage(path=io.BytesIO())
     wal = WAL(None)
-    tree = CIDTree(storage, wal)
+    tree = CIDStore(storage, wal)
 
     k_multi = E.from_str("multi")
-    tree.insert(k_multi, E(1))
+    await tree.insert(k_multi, E(1))
     for i in range(1, 151):
         v = E(i)
-        tree.insert(k_multi, v)
-    values = list(tree.get(k_multi))
+        await tree.insert(k_multi, v)
+    values = await tree.get(k_multi)
     assert values == [E(i) for i in range(1, 151)]
 
     tree.hdf.close()

@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from cidtree.keys import E
+from cidstore.keys import E
 
 # Directory/Bucket Spec Compliance Tests (TDD, Hash Directory Model)
 # All tests are spec-driven and implementation-agnostic.

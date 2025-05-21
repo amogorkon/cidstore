@@ -1,13 +1,13 @@
-from cidtree.keys import E
-from cidtree.storage import Storage
-from cidtree.tree import CIDTree, OpType
-from cidtree.wal import WAL
+from cidstore.keys import E
+from cidstore.storage import Storage
+from cidstore.store import CIDStore
+from cidstore.wal import WAL, OpType
 
 
 def make_tree():
     storage = Storage(":memory:")
     wal = WAL(path=":memory:")
-    return CIDTree(storage, wal)
+    return CIDStore(storage, wal)
 
 
 def test_wal_log_entry_on_insert():
@@ -63,7 +63,7 @@ def test_wal_commit_and_rollback():
     v2 = E(2)
     tree.insert(k1, v1)
     tree.insert(k2, v2)
-    # No explicit rollback/commit API in CIDTree, so just check WAL contains both inserts
+    # No explicit rollback/commit API in CIDStore, so just check WAL contains both inserts
     wal_records = tree.wal.replay()
     assert any(
         r["op_type"] == OpType.INSERT.value and r["key_high"] == k1.high
@@ -83,7 +83,7 @@ def test_wal_recovery():
     # Simulate crash by closing and reopening
     tree.wal.close()
     wal = WAL(path=":memory:")
-    tree2 = CIDTree(tree.hdf, wal)
+    tree2 = CIDStore(tree.hdf, wal)
     # Replay should restore the insert
     wal_records = tree2.wal.replay()
     assert any(

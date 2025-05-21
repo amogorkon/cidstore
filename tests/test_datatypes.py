@@ -4,7 +4,7 @@ Covers canonical data types, key/value encoding, and structure (E class, ValueSe
 All tests are TDD-style and implementation-agnostic.
 """
 
-from cidtree.keys import E
+from cidstore.keys import E
 
 
 def test_e_high_low():
@@ -42,40 +42,32 @@ def test_e_in_valueset_and_hashentry(directory):
     directory.insert(key2, value2)
     result = list(directory.lookup(key2))
     assert value2 in result or int(value2) in [int(x) for x in result]
-    # Spec 2: Check canonical structure of HashEntry and ValueSet
+    # Spec 2: Check canonical structure of HashEntry and ValueSet (new model)
     entry = directory.get_entry(key2)
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry
-    assert "state_mask" in entry
-    assert "version" in entry
-    # State mask must be ECC-protected (8 bits, 4 data + 4 ECC)
-    mask = entry["state_mask"]
-    assert isinstance(mask, int)
-    assert 0 <= mask <= 255
+    assert "checksum" in entry
+    # Check that slots is a list/tuple of length 2 (inline) or a SpillPointer (external)
+    slots = entry["slots"]
+    if isinstance(slots, (list, tuple)):
+        assert len(slots) == 2
+    # Check checksum is 16 bytes (int or bytes)
+    checksum = entry["checksum"]
+    assert isinstance(checksum, (int, bytes))
     # Optionally, check for sorted_count if present
-    assert "sorted_count" in entry
-    assert isinstance(entry["sorted_count"], int)
-    # Spec 2: Check canonical structure of HashEntry and ValueSet
+    if "sorted_count" in entry:
+        assert isinstance(entry["sorted_count"], int)
+    # Repeat for key
     entry = directory.get_entry(key)
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry
-    assert "state_mask" in entry
-    assert "version" in entry
-    # State mask must be ECC-protected (8 bits, 4 data + 4 ECC)
-    mask = entry["state_mask"]
-    assert isinstance(mask, int)
-    assert 0 <= mask <= 255
-    # Optionally, check for sorted_count if present
-    assert "sorted_count" in entry
-    assert isinstance(entry["sorted_count"], int)
-    assert "state_mask" in entry
-    assert "version" in entry
-    # State mask must be ECC-protected (8 bits, 4 data + 4 ECC)
-    mask = entry["state_mask"]
-    assert isinstance(mask, int)
-    assert 0 <= mask <= 255
-    # Optionally, check for sorted_count if present
-    assert "sorted_count" in entry
-    assert isinstance(entry["sorted_count"], int)
+    assert "checksum" in entry
+    slots = entry["slots"]
+    if isinstance(slots, (list, tuple)):
+        assert len(slots) == 2
+    checksum = entry["checksum"]
+    assert isinstance(checksum, (int, bytes))
+    if "sorted_count" in entry:
+        assert isinstance(entry["sorted_count"], int)

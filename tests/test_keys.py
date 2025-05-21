@@ -1,15 +1,15 @@
 # Additional tests for CID, immutability, and ValueSet/HashEntry integration
-from cidtree.keys import E
+from cidstore.keys import E
 
 
 def test_cid_in_valueset_and_hashentry():
     # Simulate ValueSet and HashEntry usage
     import tempfile
 
-    from cidtree.main import CIDTree
+    from cidstore.main import CIDTree
 
     with tempfile.TemporaryDirectory() as tmp:
-        from cidtree.tree import WAL, Storage
+        from cidstore.store import WAL, Storage
 
         storage = Storage(f"{tmp}/test.h5")
         wal = WAL(None)

@@ -1,13 +1,13 @@
 # Additional tests for directory migration, SWMR metadata, and atomic updates
 import h5py
-from cidtree.storage import Storage
+from cidstore.storage import Storage
 
 
 def test_directory_attribute_to_dataset_migration(tmp_path):
-    from cidtree.keys import E
-    from cidtree.main import CIDTree
-    from cidtree.storage import Storage
-    from cidtree.wal import WAL
+    from cidstore.keys import E
+    from cidstore.main import CIDTree
+    from cidstore.storage import Storage
+    from cidstore.wal import WAL
 
     path = tmp_path / "migrate.h5"
     storage = Storage(str(path))
@@ -20,10 +20,10 @@ def test_directory_attribute_to_dataset_migration(tmp_path):
 
 
 def test_swmmr_metadata_and_atomicity(tmp_path):
-    from cidtree.keys import E
-    from cidtree.main import CIDTree
-    from cidtree.storage import Storage
-    from cidtree.wal import WAL
+    from cidstore.keys import E
+    from cidstore.main import CIDTree
+    from cidstore.storage import Storage
+    from cidstore.wal import WAL
 
     path = tmp_path / "swmr.h5"
     storage = Storage(str(path))
@@ -42,8 +42,8 @@ def test_storage_manager_in_memory(in_memory_hdf5):
     # Ensure required groups/datasets are created
     storage._ensure_core_groups()
     # Check that config, nodes, values groups exist
-    from cidtree.config import WAL_DATASET
-    from cidtree.wal import WAL
+    from cidstore.config import WAL_DATASET
+    from cidstore.wal import WAL
 
     wal = WAL(storage)  # Ensure WAL dataset is created
     assert storage.file is not None

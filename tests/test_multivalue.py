@@ -6,30 +6,52 @@ All tests are TDD-style and implementation-agnostic.
 
 
 def test_inline_to_spill_promotion(directory):
-    """Inserting enough values for a key should promote from inline to external ValueSet."""
+    """Inserting more than two values for a key should promote from inline to external ValueSet (SpillPointer)."""
     key = "multi"
-    for i in range(1, 201):
-        directory.insert(key, i)
+    directory.insert(key, 1)
+    directory.insert(key, 2)
+    # Should still be inline (slots length 2, both nonzero)
+    entry = directory.get_entry(key)
+    slots = entry["slots"]
+    assert isinstance(slots, (list, tuple))
+    assert len(slots) == 2
+    assert slots[0] != 0 and slots[1] != 0
+    if hasattr(directory, "is_spilled"):
+        assert not directory.is_spilled(key)
+    directory.insert(key, 3)
+    # Should now be promoted to ValueSet (spill): slot0 == 0, slot1 = spill pointer
+    entry = directory.get_entry(key)
+    slots = entry["slots"]
+    assert isinstance(slots, (list, tuple))
+    assert len(slots) == 2
+    assert slots[0] == 0
+    assert slots[1] != 0  # spill pointer
     if hasattr(directory, "is_spilled"):
         assert directory.is_spilled(key)
     # All values should be present
     result = list(directory.lookup(key))
-    assert all(i in [int(x) for x in result] for i in range(1, 201))
+    assert all(i in [int(x) for x in result] for i in range(1, 4))
 
 
 def test_spill_to_inline_demotion(directory):
-    """After deleting values, ValueSet may be demoted back to inline if below threshold."""
+    """After deleting values, ValueSet may be demoted back to inline if two or fewer values remain."""
     key = "demote"
-    for i in range(1, 201):
+    for i in range(1, 5):
         directory.insert(key, i)
-    for i in range(1, 190):
+    for i in range(1, 3):
         directory.delete(key, i)
+    # Should be eligible for demotion: slots should be inline (length 2, both nonzero)
     if hasattr(directory, "is_spilled") and hasattr(directory, "demote_if_possible"):
         directory.demote_if_possible(key)
         assert not directory.is_spilled(key)
+    entry = directory.get_entry(key)
+    slots = entry["slots"]
+    assert isinstance(slots, (list, tuple))
+    assert len(slots) == 2
+    assert slots[0] != 0 and slots[1] != 0
     # Remaining values should be present
     result = list(directory.lookup(key))
-    assert all(i in [int(x) for x in result] for i in range(190, 201))
+    assert all(i in [int(x) for x in result] for i in range(3, 5))
 
 
 def test_compaction_removes_tombstones(directory):
@@ -59,9 +81,9 @@ def test_multivalue_edge_cases(directory):
 
 
 def test_multivalue_get_entry_fields(directory):
-    """get_entry should return all canonical fields for a multi-value key."""
+    """get_entry should return all canonical fields for a multi-value key (no state_mask)."""
     key = "entryfields"
-    for i in range(1, 6):
+    for i in range(1, 4):
         directory.insert(key, i)
     entry = directory.get_entry(key)
     assert entry is not None
@@ -69,12 +91,13 @@ def test_multivalue_get_entry_fields(directory):
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry
-    assert "state_mask" in entry
-    assert "version" in entry
+    slots = entry["slots"]
+    assert isinstance(slots, (list, tuple))
+    assert len(slots) == 2
     assert "values" in entry
     assert "value" in entry
     # All inserted values should be present
-    for i in range(1, 6):
+    for i in range(1, 4):
         assert i in entry["values"]
 
 

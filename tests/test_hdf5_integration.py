@@ -8,7 +8,7 @@ import h5py
 
 
 def test_hdf5_sharding_and_layout(tmp_path):
-    from cidtree.main import CIDTree
+    from cidstore.main import CIDTree
 
     path = tmp_path / "shard.h5"
     tree = CIDTree(str(path))
@@ -19,10 +19,23 @@ def test_hdf5_sharding_and_layout(tmp_path):
         # Check for sharded/hybrid directory structure
         found_shard = any("shard" in k or "hybrid" in k for k in f.keys())
         assert found_shard or True  # Accept if not present
+        # Check that HashEntry datasets only have key, slots[2], checksum fields
+        if "buckets" in f:
+            for bucket_name in f["buckets"]:
+                ds = f["buckets"][bucket_name]
+                fields = (
+                    list(ds.dtype.fields.keys())
+                    if hasattr(ds, "dtype") and ds.dtype.fields
+                    else []
+                )
+                for field in fields:
+                    assert field in ("key_high", "key_low", "slots", "checksum"), (
+                        f"Unexpected field {field} in HashEntry dataset"
+                    )
 
 
 def test_hdf5_metrics_and_logging(tmp_path):
-    from cidtree.main import CIDTree
+    from cidstore.main import CIDTree
 
     path = tmp_path / "metrics.h5"
     tree = CIDTree(str(path))
@@ -40,7 +53,7 @@ def test_hdf5_sharded_directory_migration(tmp_path):
     """Explicitly test sharded directory migration and verify sharded datasets."""
     import h5py
 
-    from cidtree.main import CIDTree
+    from cidstore.main import CIDTree
 
     path = tmp_path / "sharded_dir.h5"
     tree = CIDTree(str(path))

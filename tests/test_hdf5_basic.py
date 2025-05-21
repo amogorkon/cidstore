@@ -1,18 +1,19 @@
-# Basic HDF5 layout and attribute tests for CIDTree
+# Basic HDF5 layout and attribute tests for CIDStore
 import io
 
 import h5py
-from cidtree.keys import E
-from cidtree.main import CIDTree
-from cidtree.storage import Storage
-from cidtree.tree import WAL
+
+from cidstore.keys import E
+from cidstore.main import CIDStore
+from cidstore.storage import Storage
+from cidstore.store import WAL
 
 
 def test_hdf5_file_layout(tmp_path):
     f = io.BytesIO()
     storage = Storage(f)
     wal = WAL(None)
-    tree = CIDTree(storage, wal=wal)
+    tree = CIDStore(storage, wal=wal)
     # Insert a value to ensure file is initialized
     tree.insert(E.from_str("foo"), E.from_int(1))
     f.seek(0)
@@ -28,13 +29,20 @@ def test_hdf5_file_layout(tmp_path):
             "wal" in str(g) for g in h5f
         )
         assert found_wal
+        # Check that HashEntry datasets only have key, slots[2], checksum fields
+        if "buckets" in h5f:
+            for bucket_name in h5f["buckets"]:
+                ds = h5f["buckets"][bucket_name]
+                fields = list(ds.dtype.fields.keys()) if hasattr(ds, 'dtype') and ds.dtype.fields else []
+                for field in fields:
+                    assert field in ("key_high", "key_low", "slots", "checksum"), f"Unexpected field {field} in HashEntry dataset"
 
 
 def test_hdf5_attributes_and_metadata(tmp_path):
     f = io.BytesIO()
     storage = Storage(f)
     wal = WAL(None)
-    tree = CIDTree(storage, wal=wal)
+    tree = CIDStore(storage, wal=wal)
     tree.insert(E.from_str("bar"), E.from_int(2))
     f.seek(0)
     with h5py.File(f, "r") as h5f:
@@ -48,7 +56,7 @@ def test_hdf5_bucket_and_valueset_presence(tmp_path):
     f = io.BytesIO()
     storage = Storage(f)
     wal = WAL(None)
-    tree = CIDTree(storage, wal=wal)
+    tree = CIDStore(storage, wal=wal)
     key = "baz"
     tree.insert(E.from_str(key), E.from_int(42))
     f.seek(0)
