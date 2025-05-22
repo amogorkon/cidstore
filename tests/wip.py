@@ -1,4 +1,4 @@
-"""WIP tests."""
+"""WIP. This is where code is tested as it is developed. It is not a test, but a scratchpad for testing code snippets and ideas. It is not meant to be run as a test suite, but rather as a playground for experimentation."""
 
 import asyncio
 import inspect
@@ -16,13 +16,14 @@ async def test_standard_workflow():
     tree = CIDStore(storage, wal)
 
     k = E.from_str("multi")
-    await tree.insert(k, E(1))
-    print(await tree.get(k))
-    await tree.insert(k, E(2))
-    print(await tree.get(k))
-    await tree.insert(k, E(3))
-    print(await tree.get(k))
-    values = await list(tree.get(k))
+    a, b, c = E(1), E(2), E(3)
+    await tree.insert(k, a)
+    print(list(await tree.get(k)))
+    await tree.insert(k, b)
+    print(list(await tree.get(k)))
+    await tree.insert(k, c)
+    print(list(await tree.get(k)))
+    values = list(await tree.get(k))
     assert values == [E(1), E(2), E(3)]
 
     tree.hdf.close()
