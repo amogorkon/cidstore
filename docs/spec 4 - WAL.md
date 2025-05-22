@@ -46,7 +46,7 @@ See [Spec 2: Data Types and Structure](spec%202%20-%20Data%20Types%20and%20Struc
 2‑bit Version Field in the top bits of the version/op field:
 
 - 0 = Past
-- 1 = Current
+- 1 = NOW (current)
 - 2 = Next
 - 3 = Future
 
@@ -166,7 +166,7 @@ priority = (query_rate * danger_score) / estimated_merge_cost
 2‑bit version per record (0–3) in the version/op field:
 
 - 0 = Past
-- 1 = Current
+- 1 = NOW (current)
 - 2 = Next
 - 3 = Future
 
