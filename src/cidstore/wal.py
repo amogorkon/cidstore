@@ -7,6 +7,7 @@ import logging
 import mmap
 import os
 import struct
+import sys
 import threading
 import time
 import zlib
@@ -62,14 +63,21 @@ except ImportError:
     PROMETHEUS_AVAILABLE = False
 
 HASH_ENTRY_DTYPE = np.dtype([
-    ("key_high", "<u8"),
-    ("key_low", "<u8"),
+    ("k_high", "<u8"),
+    ("k_low", "<u8"),
     ("slots", "<u8", 4),
     ("state_mask", "u1"),
     ("version", "<u4"),
 ])
 
 logger = logging.getLogger(__name__)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 MAX_TXN_RECORDS = 1000
 RECORD_SIZE = 64
@@ -142,6 +150,9 @@ class WAL:
         self._lock = threading.RLock()
         self._mmap: mmap.mmap
 
+        # Event for async consumers to be notified of new records
+        self._new_record_event = asyncio.Event()
+
         self._open()
         self._head: int = 0
         self._tail: int = 0
@@ -211,13 +222,21 @@ class WAL:
     async def consume_async(self, store, poll_interval: float = 0.1):
         """
         Async WAL consumer loop.
-        Continuously reads new records and applies them to the store using internal, non-logging methods.
+        Waits for new records using an event, with polling as fallback.
         Args:
             store: The CIDStore instance (must have an async _wal_apply method or use asyncio.to_thread).
             poll_interval: Time in seconds to wait between polling for new records.
         """
+
         while True:
-            await asyncio.sleep(poll_interval)
+            try:
+                # Wait for either the event or a timeout
+                await asyncio.wait_for(
+                    self._new_record_event.wait(), timeout=poll_interval
+                )
+            except asyncio.TimeoutError:
+                pass  # Timeout: fall back to polling
+
             with self._lock:
                 tail = self._get_tail()
                 head = self._get_head()
@@ -237,6 +256,8 @@ class WAL:
                         await asyncio.to_thread(store._wal_apply, op)
                     self._set_tail(current_pos)
                     self._mmap.flush()
+                    # Only clear the event if we actually processed new records
+                    self._new_record_event.clear()
             # Optionally, add a stop condition or external cancellation
 
     def _init_header(self):
@@ -290,6 +311,7 @@ class WAL:
             wal_tail_position.set(value)
 
     async def append(self, records: list[bytes]):
+        logger.info(f"[WAL.append] Called with {len(records)} record(s)")
         head = self._get_head()
         tail = self._get_tail()
         rec_area_size = self.size - WAL.HEADER_SIZE
@@ -307,6 +329,7 @@ class WAL:
             raise RuntimeError("WAL file full; checkpoint required")
         for rec in records:
             write_pos = head
+            logger.debug(f"[WAL.append] Writing record at position {write_pos}")
             self._mmap[write_pos : write_pos + WAL.REC_SIZE] = rec
             head += WAL.REC_SIZE
             if head >= self.size:
@@ -314,19 +337,32 @@ class WAL:
                 logger.debug("WAL head wrapped around.")
         self._set_head(head)
         self._mmap.flush()
-        logger.info(f"Appended {len(records)} WAL record(s). New head: {head}.")
+        logger.info(
+            f"[WAL.append] Appended {len(records)} WAL record(s). New head: {head}."
+        )
         if PROMETHEUS_AVAILABLE:
             wal_records_appended.labels(operation="append").inc(len(records))
             wal_records_in_buffer.set(
                 (head - tail + rec_area_size) % rec_area_size // WAL.REC_SIZE
             )
+        # Notify async consumers that new records are available (only if in async context)
+        try:
+            loop = asyncio.get_running_loop()
+            self._new_record_event.set()
+        except RuntimeError:
+            # Not in an async context; skip setting the event for thread safety
+            logger.debug(
+                "[WAL.append] Skipped setting _new_record_event: not in async context."
+            )
 
     def replay(self) -> list[dict[str, Any]]:
+        logger.info("[WAL.replay] Called")
         ops: list[dict[str, Any]] = []
         with self._lock:
             tail = self._get_tail()
             head = self._get_head()
             current_pos = tail
+            logger.debug(f"[WAL.replay] Starting at tail={tail}, head={head}")
             while current_pos != head:
                 rec_bytes = self._mmap[current_pos : current_pos + WAL.REC_SIZE]
                 rec = unpack_record(rec_bytes)
@@ -338,7 +374,7 @@ class WAL:
             self._set_tail(head)
             self._mmap.flush()
             logger.info(
-                f"Replay complete. Processed {len(ops)} records. New tail: {head}."
+                f"[WAL.replay] Replayed {len(ops)} record(s). Tail set to head {head}."
             )
             if PROMETHEUS_AVAILABLE:
                 wal_replay_count.inc()
@@ -428,9 +464,9 @@ class WAL:
         return nanos, self._wal_seq, self.shard_id
 
     async def log_insert(self, k_high, k_low, v_high, v_low, time=None):
-        """
-        Append a TXN_START, INSERT, TXN_COMMIT batch for a single insert.
-        """
+        logger.info(
+            f"[WAL.log_insert] Called with {k_high=}, {k_low=}, {v_high=}, {v_low=}"
+        )
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
@@ -438,6 +474,9 @@ class WAL:
             pack_record(OpVer.NOW, OpType.INSERT, time, k_high, k_low, v_high, v_low),
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
         ])
+        logger.info(
+            f"[WAL.log_insert] Inserted record for {k_high=}, {k_low=}, {v_high=}, {v_low=}"
+        )
 
     def flush(self) -> None:
         """
@@ -465,9 +504,11 @@ class WAL:
     async def batch_insert(self, items: list[tuple[int, int, int, int]]) -> None:
         """
         Atomically log a batch of inserts as a single WAL transaction (TXN_START, multiple INSERT, TXN_COMMIT).
-        Each item is a tuple: (key_high, key_low, value_high, value_low)
+        Each item is a tuple: (k_high, k_low, v_high, v_low)
         """
+        logger.info(f"[WAL.batch_insert] Called with {len(items)} item(s)")
         if not items:
+            logger.info("[WAL.batch_insert] No items to insert.")
             return
         time_tuple = self._next_hybrid_time()
         records = [pack_record(OpVer.NOW, OpType.TXN_START, time_tuple, 0, 0, 0, 0)]
@@ -476,24 +517,27 @@ class WAL:
                 OpVer.NOW,
                 OpType.INSERT,
                 time_tuple,
-                key_high,
-                key_low,
-                value_high,
-                value_low,
+                k_high,
+                k_low,
+                v_high,
+                v_low,
             )
-            for key_high, key_low, value_high, value_low in items
+            for k_high, k_low, v_high, v_low in items
         )
         records.append(
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0)
         )
         await self.append(records)
+        logger.info(f"[WAL.batch_insert] Inserted {len(items)} item(s)")
 
     async def batch_delete(self, items: list[tuple[int, int]]) -> None:
         """
         Atomically log a batch of deletes as a single WAL transaction (TXN_START, multiple DELETE, TXN_COMMIT).
-        Each item is a tuple: (key_high, key_low)
+        Each item is a tuple: (k_high, k_low)
         """
+        logger.info(f"[WAL.batch_delete] Called with {len(items)} item(s)")
         if not items:
+            logger.info("[WAL.batch_delete] No items to delete.")
             return
         time_tuple = self._next_hybrid_time()
         records = [pack_record(OpVer.NOW, OpType.TXN_START, time_tuple, 0, 0, 0, 0)]
@@ -502,22 +546,21 @@ class WAL:
                 OpVer.NOW,
                 OpType.DELETE,
                 time_tuple,
-                key_high,
-                key_low,
+                k_high,
+                k_low,
                 0,
                 0,
             )
-            for key_high, key_low in items
+            for k_high, k_low in items
         )
         records.append(
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0)
         )
         await self.append(records)
+        logger.info(f"[WAL.batch_delete] Deleted {len(items)} item(s)")
 
-    async def log_delete(self, key_high, key_low, time=None):
-        """
-        Append a TXN_START, DELETE, TXN_COMMIT batch for a single delete.
-        """
+    async def log_delete(self, k_high, k_low, time=None):
+        logger.info(f"[WAL.log_delete] Called with k_high={k_high}, k_low={k_low}")
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
@@ -526,21 +569,27 @@ class WAL:
                 OpVer.NOW,
                 OpType.DELETE,
                 time,
-                key_high,
-                key_low,
+                k_high,
+                k_low,
                 0,
                 0,
             ),
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
         ])
+        logger.info(
+            f"[WAL.log_delete] Deleted record for k_high={k_high}, k_low={k_low}"
+        )
 
     async def log_delete_value(self, k_high, k_low, v_high, v_low, time=None):
         """
         Log the deletion of a specific value from a valueset as a WAL transaction.
         Args:
-            key_high, key_low: The key to delete from.
-            value_high, value_low: The value to delete.
+            k_high, k_low: The key to delete from.
+            v_high, v_low: The value to delete.
         """
+        logger.info(
+            f"[WAL.log_delete_value] Called with k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
+        )
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
@@ -548,6 +597,9 @@ class WAL:
             pack_record(OpVer.NOW, OpType.DELETE, time, k_high, k_low, v_high, v_low),
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
         ])
+        logger.info(
+            f"[WAL.log_delete_value] Deleted value for k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
+        )
 
     def _wal_apply(self, op: dict[str, Any]) -> None:
         """
@@ -557,11 +609,11 @@ class WAL:
         """
         match op["op_type"]:
             case OpType.INSERT.value:
-                key = E(op["key_high"], op["key_low"])
-                value = E(op["value_high"], op["value_low"])
+                key = E(op["k_high"], op["k_low"])
+                value = E(op["v_high"], op["v_low"])
                 self._wal_replay_insert(key, value)
             case OpType.DELETE.value:
-                key = E(op["key_high"], op["key_low"])
+                key = E(op["k_high"], op["k_low"])
                 self._wal_replay_delete(key)
             case OpType.TXN_START.value:
                 self._wal_replay_txn_start()
@@ -573,10 +625,10 @@ def pack_record(
     version: OpVer,
     op_type: OpType,
     time: tuple[int, int, int],
-    key_high,
-    key_low,
-    value_high,
-    value_low,
+    k_high,
+    k_low,
+    v_high,
+    v_low,
 ) -> bytes:
     ver = int(version.value)
     op = int(op_type.value)
@@ -591,10 +643,10 @@ def pack_record(
         nanos,
         seq,
         shard_id,
-        key_high,
-        key_low,
-        value_high,
-        value_low,
+        k_high,
+        k_low,
+        v_high,
+        v_low,
     )
     checksum = zlib.crc32(packed_core) & 0xFFFFFFFF
     # Pad to 64 bytes as per spec (WAL record must be 64 bytes)
@@ -634,10 +686,10 @@ def unpack_record(rec: bytes) -> dict[str, int] | None:
             nanos,
             seq,
             shard_id,
-            key_high,
-            key_low,
-            value_high,
-            value_low,
+            k_high,
+            k_low,
+            v_high,
+            v_low,
         ) = struct.unpack("<BBQIIQQQQ", packed_core)
     except struct.error as e:
         logger.error(f"Error unpacking WAL record struct: {e}")
@@ -653,9 +705,9 @@ def unpack_record(rec: bytes) -> dict[str, int] | None:
         "nanos": nanos,
         "seq": seq,
         "shard_id": shard_id,
-        "key_high": key_high,
-        "key_low": key_low,
-        "value_high": value_high,
-        "value_low": value_low,
+        "k_high": k_high,
+        "k_low": k_low,
+        "v_high": v_high,
+        "v_low": v_low,
         "checksum": stored_checksum,
     }

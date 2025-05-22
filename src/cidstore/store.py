@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import sys
 import threading
 from collections.abc import Iterable
 from typing import Any
@@ -14,6 +16,15 @@ import numpy as np
 from .keys import E
 from .storage import Storage
 from .wal import WAL
+
+logger = logging.getLogger(__name__)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 CONF = "/config"
 
@@ -40,8 +51,8 @@ class CIDStore:
         with self.hdf as f:
             if "/buckets" not in f:
                 f.create_group("/buckets")
-        self._bucket_counter = 0
         self._load_directory()
+        self._bucket_counter = 0
         self._wal_consumer_task = asyncio.create_task(self.wal.consume_async(self))
 
     async def wal_checkpoint(self):
@@ -63,12 +74,16 @@ class CIDStore:
         await self.wal.batch_delete([(key.high, key.low) for key in keys])
 
     async def insert(self, key: E, value: E) -> None:
+        logger.info(f"[CIDStore.insert] Called with {key=} {value=}")
         assert isinstance(key, E)
         assert isinstance(value, E)
+        assert key != E(0) != value
         V = await self.get(key)
         if V and value in V:
+            logger.info(f"[CIDStore.insert] Value already present for {key=}")
             return
         await self.wal.log_insert(key.high, key.low, value.high, value.low)
+        logger.info(f"[CIDStore.insert] Inserted value for {key=}")
 
     async def delete(self, key: E) -> None:
         """
@@ -81,25 +96,31 @@ class CIDStore:
         await self.wal.log_delete(key.high, key.low)
 
     async def get(self, key: E) -> Iterable[E]:
+        logger.info(f"[CIDStore.get] Called with {key=}")
         assert isinstance(key, E)
         bucket_id = self.dir.get(key)
         if bucket_id is None:
+            logger.info(f"[CIDStore.get] No bucket found for {key=}")
             return iter([])
         bucket_name = f"bucket_{bucket_id}"
         bucket = self.buckets.get(bucket_name)
         if bucket is None:
+            logger.info(f"[CIDStore.get] No bucket object found for {key=}")
             return iter([])
         for i in range(bucket.shape[0]):
             if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
                 if bucket[i]["state_mask"] != 0:
+                    logger.info(f"[CIDStore.get] Returning inline values for {key=}")
                     return (E(slot) for slot in bucket[i]["slots"] if slot != 0)
                 spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
                 values_group = self.hdf.file["/values/sp"]
-                return (
-                    (E(v) for v in values_group[spill_ds_name][:] if v != 0)
-                    if spill_ds_name in values_group
-                    else iter([])
-                )
+                if spill_ds_name in values_group:
+                    logger.info(f"[CIDStore.get] Returning spill values for {key=}")
+                    return (E(v) for v in values_group[spill_ds_name][:] if v != 0)
+                else:
+                    logger.info(f"[CIDStore.get] No spill values for {key=}")
+                    return iter([])
+        logger.info(f"[CIDStore.get] Key not found in any bucket: {key=}")
         return iter([])
 
     async def get_entry(self, key: E):

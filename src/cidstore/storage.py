@@ -1,6 +1,8 @@
 """storage.py - HDF5 storage manager and raw hooks for CIDTree"""
 
 import io
+import logging
+import sys
 from pathlib import Path
 from time import time
 from typing import Any
@@ -11,6 +13,15 @@ from .config import CONFIG_GROUP, NODES_GROUP, VALUES_GROUP
 from .keys import E
 
 HDF5_NOT_OPEN_MSG = "HDF5 file is not open."
+
+logger = logging.getLogger(__name__)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 
 ROOT = "/root"
@@ -25,17 +36,33 @@ class Storage:
         match path:
             case None:
                 self.path = io.BytesIO()
+                storage_type = "in-memory"
             case str():
                 self.path = Path(path)
+                storage_type = "file"
             case Path():
                 self.path = path
+                storage_type = "file"
             case io.BytesIO():
                 self.path = path
+                storage_type = "in-memory"
             case _:
                 raise TypeError("path must be str, Path, or io.BytesIO or None")
         self.file: h5py.File = self.open()
         self._init_hdf5_layout()
         self._init_root()
+
+        mode = self.file.mode if hasattr(self.file, "mode") else "unknown"
+        swmr = self.file.swmr_mode if hasattr(self.file, "swmr_mode") else False
+        try:
+            groups = list(self.file.keys())
+        except Exception:
+            groups = []
+        path_str = str(self.path) if not isinstance(self.path, io.BytesIO) else None
+        logger.info(
+            f"Storage initialized ({storage_type}, path={path_str}, mode={mode}, "
+            f"swmr={swmr}, groups={groups})"
+        )
 
     def _init_root(self) -> None:
         """
