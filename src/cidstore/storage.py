@@ -2,6 +2,7 @@
 
 import io
 from pathlib import Path
+from time import time
 from typing import Any
 
 import h5py
@@ -12,17 +13,92 @@ from .keys import E
 HDF5_NOT_OPEN_MSG = "HDF5 file is not open."
 
 
+ROOT = "/root"
+
+
 class Storage:
     def __init__(self, path: str | Path | io.BytesIO | None) -> None:
         """
         Initialize the StorageManager with the given file path or in-memory buffer.
         Accepts a string path, pathlib.Path, or an io.BytesIO object for in-memory operation.
         """
-        self.path: str | Path | io.BytesIO | None = path
-        if not path:
-            self.path = io.BytesIO()
-        self.file: h5py.File | None = None
-        self.open("a")
+        match path:
+            case None:
+                self.path = io.BytesIO()
+            case str():
+                self.path = Path(path)
+            case Path():
+                self.path = path
+            case io.BytesIO():
+                self.path = path
+            case _:
+                raise TypeError("path must be str, Path, or io.BytesIO or None")
+        self.file: h5py.File = self.open()
+        self._init_hdf5_layout()
+        self._init_root()
+
+    def _init_root(self) -> None:
+        """
+        Initialize the root node in the HDF5 file.
+        """
+        if ROOT not in self.file:
+            self.file.create_group(ROOT)
+        # Initialize with empty data
+        self.file[ROOT].attrs["data"] = b""
+        self.file[ROOT].attrs["type"] = b""
+        self.file[ROOT].attrs["size"] = 0
+        self.file[ROOT].attrs["count"] = 0
+        self.file[ROOT].attrs["next"] = 0
+        self.file[ROOT].attrs["prev"] = 0
+        self.file[ROOT].attrs["flags"] = 0
+        self.file[ROOT].attrs["padding"] = b""
+        self.file[ROOT].attrs["checksum"] = 0
+
+    def _init_hdf5_layout(self) -> None:
+        """
+        Ensure all groups, datasets, and attributes match canonical layout (Spec 9).
+        """
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
+
+        f = self.file
+        cfg = f.require_group("/config")
+        cfg.attrs.setdefault("format_version", 1)
+        cfg.attrs.setdefault("created_by", "CIDStore")
+        cfg.attrs.setdefault("swmr", True)
+        cfg.attrs.setdefault("last_opened", int(time()))
+        cfg.attrs.setdefault("last_modified", int(time()))
+        if "dir" not in cfg.attrs:
+            cfg.attrs["dir"] = "{}"
+        f.attrs.setdefault("cidstore_version", "1.0")
+        f.attrs.setdefault("hdf5_version", h5py.version.hdf5_version)
+        f.attrs.setdefault("swmr", True)
+        if "/values" not in f:
+            f.create_group("/values")
+        if "/values/sp" not in f:
+            f["/values"].create_group("sp")
+        if "/nodes" not in f:
+            f.create_group("/nodes")
+        f.flush()
+        # self.deletion_log = DeletionLog(f)
+        # self.gc_thread = BackgroundGC(self)
+        # self.gc_thread.start()
+
+    def _ensure_core_groups(self) -> None:
+        """
+        Ensure that the CONFIG, NODES, VALUES, and BUCKETS groups exist.
+        Note: WAL_DATASET is managed by the WAL class itself.
+        """
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
+        if self.file is None:
+            raise RuntimeError(HDF5_NOT_OPEN_MSG)
+        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP, "/buckets"):
+            g = self.file.require_group(grp)
+            # Add required attributes to /config for test compatibility
+            if grp == CONFIG_GROUP:
+                if "format_version" not in g.attrs:
+                    g.attrs["format_version"] = 1
+                if "version_string" not in g.attrs:
+                    g.attrs["version_string"] = "1.0.0"
 
     def __getitem__(self, item):
         """
@@ -49,13 +125,6 @@ class Storage:
         if self.file is None:
             self.open()
         return self.file.create_group(name)
-
-    def rollback_to_version(self, version: int) -> None:
-        """
-        Override in a subclass or bind to a tree method if needed.
-        Rollback to a previous version. This is a stub for WAL compatibility.
-        """
-        assert isinstance(version, int), "version must be int"
 
     def open(self, mode: str = "a", swmr: bool = False) -> h5py.File:
         """
@@ -84,23 +153,6 @@ class Storage:
             return self.file
         except (OSError, RuntimeError) as e:
             raise RuntimeError(f"Failed to open HDF5 file '{self.path}': {e}") from e
-
-    def _ensure_core_groups(self) -> None:
-        """
-        Ensure that the CONFIG, NODES, VALUES, and BUCKETS groups exist.
-        Note: WAL_DATASET is managed by the WAL class itself.
-        """
-        assert self.file is not None, HDF5_NOT_OPEN_MSG
-        if self.file is None:
-            raise RuntimeError(HDF5_NOT_OPEN_MSG)
-        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP, "/buckets"):
-            g = self.file.require_group(grp)
-            # Add required attributes to /config for test compatibility
-            if grp == CONFIG_GROUP:
-                if "format_version" not in g.attrs:
-                    g.attrs["format_version"] = 1
-                if "version_string" not in g.attrs:
-                    g.attrs["version_string"] = "1.0.0"
 
     def flush(self) -> None:
         """
@@ -143,13 +195,6 @@ class Storage:
         """
         # No assert needed
         self.close()
-
-    # ----------------------------------------------------------------
-    # The following hooks are invoked by WAL._apply_transaction to
-    # perform raw insert/delete. They must be wired up to your
-    # BPlusTree implementation (e.g. by assigning these methods to
-    # call through to tree.insert/tree.delete).
-    # ----------------------------------------------------------------
 
     @property
     def buckets(self):
@@ -267,51 +312,3 @@ class Storage:
             del values_group[spill_ds_name]
         bucket[found_idx]["version"] += 1
         bucket.file.flush()
-
-    def _init_root(self) -> None:
-        """
-        Initialize the root node in the HDF5 file.
-        """
-        if "/root" not in self.hdf.file:
-            self.hdf.file.create_group("/root")
-        # Initialize with empty data
-        self.hdf.file["/root"].attrs["data"] = b""
-        self.hdf.file["/root"].attrs["type"] = b""
-        self.hdf.file["/root"].attrs["size"] = 0
-        self.hdf.file["/root"].attrs["count"] = 0
-        self.hdf.file["/root"].attrs["next"] = 0
-        self.hdf.file["/root"].attrs["prev"] = 0
-        self.hdf.file["/root"].attrs["flags"] = 0
-        self.hdf.file["/root"].attrs["padding"] = b""
-        self.hdf.file["/root"].attrs["checksum"] = 0
-
-    def _init_hdf5_layout(self) -> None:
-        """
-        Ensure all groups, datasets, and attributes match canonical layout (Spec 9).
-        """
-        if self.hdf.file is None:
-            self.hdf.open("a")
-        f = self.hdf.file
-        cfg = f.require_group("/config")
-        cfg.attrs.setdefault("format_version", 1)
-        cfg.attrs.setdefault("created_by", "CIDStore")
-        cfg.attrs.setdefault("swmr", True)
-        cfg.attrs.setdefault("last_opened", int(time.time()))
-        cfg.attrs.setdefault("last_modified", int(time.time()))
-        if "dir" not in cfg.attrs:
-            cfg.attrs["dir"] = "{}"
-        f.attrs.setdefault("cidstore_version", "1.0")
-        f.attrs.setdefault("hdf5_version", h5py.version.hdf5_version)
-        f.attrs.setdefault("swmr", True)
-        if "/values" not in f:
-            f.create_group("/values")
-        if "/values/sp" not in f:
-            f["/values"].create_group("sp")
-        if "/nodes" not in f:
-            f.create_group("/nodes")
-        f.flush()
-        if not hasattr(self, "dir") or not isinstance(self.dir, dict):
-            self.dir = {}
-        self.deletion_log = DeletionLog(f)
-        self.gc_thread = BackgroundGC(self)
-        self.gc_thread.start()

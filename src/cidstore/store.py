@@ -13,8 +13,9 @@ import numpy as np
 
 from .keys import E
 from .storage import Storage
-from .util import encode_state_mask
-from .wal import WAL, OpType
+from .wal import WAL
+
+CONF = "/config"
 
 
 class CIDStore:
@@ -27,6 +28,7 @@ class CIDStore:
 
     def __init__(self, hdf: Storage, wal: WAL) -> None:
         assert isinstance(hdf, Storage), "hdf must be a Storage"
+        assert isinstance(wal, WAL), "wal must be a WAL"
         self.hdf = hdf
         self.wal = wal
         self.dir: dict[E, int] = {}
@@ -142,7 +144,7 @@ class CIDStore:
     async def delete_value(self, key: E, value: E) -> None:
         await self.wal.log_delete_value(key.high, key.low, value.high, value.low)
 
-    async def _load_directory(self) -> None:
+    def _load_directory(self) -> None:
         """
         Load directory from HDF5 attributes or canonical dataset (Spec 3).
         """
@@ -157,9 +159,9 @@ class CIDStore:
                     )
                     for row in ds
                 }
-            elif "/config" in f and "directory" in f["/config"].attrs:
+            elif CONF in f and "directory" in f[CONF].attrs:
                 self._directory_mode = "attr"
-                attr = f["/config"].attrs["directory"]
+                attr = f[CONF].attrs["directory"]
                 if isinstance(attr, bytes):
                     attr = attr.decode("utf-8")
                 try:
@@ -179,7 +181,7 @@ class CIDStore:
         Save directory to HDF5 attributes or canonical dataset (Spec 3).
         """
         if self._directory_mode == "attr":
-            self.hdf.file["/config"].attrs.modify("dir", json.dumps(self.dir))
+            self.hdf.file[CONF].attrs.modify("dir", json.dumps(self.dir))
         elif self._directory_mode == "ds":
             ds = self._directory_dataset
             ds.resize((len(self.dir),))
@@ -214,7 +216,7 @@ class CIDStore:
             ("state_mask", "u1"),
             ("version", "<u4"),
         ])
-        # Hybrid: if >1M buckets, use sharded directory; else, single dataset
+        # Hybrid: single dataset if >1M buckets else sharded directory
         SHARD_THRESHOLD = 1_000_000
         items = list(self.dir.items())
         if len(items) > SHARD_THRESHOLD:
@@ -229,9 +231,8 @@ class CIDStore:
                 track_times=False,
             )
             for i, (k, v) in enumerate(items):
-                ek = E.from_str(k) if isinstance(k, str) else E(k)
-                ds[i]["key_high"] = ek.high
-                ds[i]["key_low"] = ek.low
+                ds[i]["key_high"] = k.high
+                ds[i]["key_low"] = k.low
                 ds[i]["bucket_id"] = v
                 ds[i]["spill_ptr"] = b""
                 ds[i]["state_mask"] = 0
@@ -239,8 +240,8 @@ class CIDStore:
             self._directory_mode = "ds"
             self._directory_dataset = ds
         # Remove old attribute
-        if "/config" in f and "dir" in f["/config"].attrs:
-            f["/config"].attrs.modify("dir", None)
+        if CONF in f and "dir" in f[CONF].attrs:
+            f[CONF].attrs.modify("dir", None)
         f.flush()
 
     async def _shard_items_into_directory(self, items, f, dt):
@@ -331,26 +332,6 @@ class CIDStore:
         assert isinstance(key, E)
         asyncio.run(self.delete(key))
 
-    def valueset_exists(self, key: E) -> bool:
-        """
-        Check if a value set exists for a key (including spilled sets).
-        """
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return False
-        bucket = self.buckets.get(f"bucket_{bucket_id}")
-        if bucket is None:
-            return False
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                if bucket[i]["state_mask"] == 0:
-                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                    values_group = self.hdf.file["/values/sp"]
-                    return spill_ds_name in values_group
-                return any(slot != 0 for slot in bucket[i]["slots"])
-        return False
-
     def get_tombstone_count(self, key: E) -> int:
         """
         Count tombstones (zeros) in the spill dataset for a key.
@@ -410,8 +391,6 @@ class CIDStore:
                             bucket[i]["slots"][:] = 0
                             for j, v in enumerate(arr):
                                 bucket[i]["slots"][j] = v
-                            mask = sum(1 << k for k in range(len(arr)))
-                            bucket[i]["state_mask"] = encode_state_mask(mask)
                             del values_group[spill_ds_name]
                 break
 
@@ -488,25 +467,6 @@ class CIDStore:
         """
         return dict(self.hdf.file["/root"]) if "/root" in self.hdf.file else None
 
-    def _wal_apply(self, op: dict[str, Any]) -> None:
-        """
-        Apply a single WAL operation.
-        Args:
-            op: WAL operation dict.
-        """
-        match op["op_type"]:
-            case OpType.INSERT.value:
-                key = E(op["key_high"], op["key_low"])
-                value = E(op["value_high"], op["value_low"])
-                self._wal_replay_insert(key, value)
-            case OpType.DELETE.value:
-                key = E(op["key_high"], op["key_low"])
-                self._wal_replay_delete(key)
-            case OpType.TXN_START.value:
-                self._wal_replay_txn_start()
-            case OpType.TXN_COMMIT.value:
-                self._wal_replay_txn_commit()
-
     def __enter__(self) -> CIDStore:
         """
         Enter the runtime context related to this object.
@@ -575,7 +535,7 @@ class CIDStore:
         )
 
     def _add_value_to_bucket_entry(
-        self, bucket: Any, entry_idx: int, key: E, value: E
+        self, bucket, entry_idx: int, key: E, value: E
     ) -> None:
         """
         Helper to add a value to a bucket entry, handling slots, spill promotion, and state mask update.
@@ -584,8 +544,6 @@ class CIDStore:
         for j in range(4):
             if slots[j] == 0:
                 slots[j] = int(value)
-                mask = sum(1 << k for k in range(4) if slots[k] != 0)
-                bucket[entry_idx]["state_mask"] = encode_state_mask(mask)
                 bucket[entry_idx]["version"] += 1
                 bucket.file.flush()
                 return
@@ -674,9 +632,5 @@ class CIDStore:
         with self._writer_lock:
             await self._save_directory()
             await self._save_wal()
-            if hasattr(self, "gc_thread") and self.gc_thread:
-                self.gc_thread.stop()
-            if hasattr(self, "file") and self.file:
-                await asyncio.to_thread(self.file.close)
-            if hasattr(self, "hdf") and self.hdf:
-                await asyncio.to_thread(self.hdf.close)
+            self.gc_thread.stop()
+            await asyncio.to_thread(self.hdf.close)
