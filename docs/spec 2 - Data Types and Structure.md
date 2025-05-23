@@ -15,22 +15,18 @@ classDiagram
         +sorted_count: int
     }
     class HashEntry {
-        +key: CID
-        +slots: CID[2] or SpillPointer
-        +checksum: uint128
-    }
-
-    class SpillPointer {
-        +ref: uint64 "HDF5 object reference as slots[0].high, ValueSet"
+        +key: E
+        +slots: E[2] or SpillPointer
+        +checksum: 2 x uint64
     }
 
     class ValueSet {
-        +values: CID[]
+        +values: E[]
         +sorted_count: int
         +tombstone_count: int
     }
 
-    class CID {
+    class E {
         +high: uint64
         +low: uint64
     }
@@ -39,8 +35,8 @@ classDiagram
         +version_op: uint8 "2-bit version, 6-bit opcode"
         +reserved: uint8 "padding/flags"
         +time: HybridTime
-        +key: CID
-        +value: CID
+        +key: E
+        +value: E
         +checksum: uint32
         +padding: uint8[10]
     }
@@ -50,19 +46,15 @@ classDiagram
         +shard_id: uint32
     }
     class DeletionRecord {
-        +key: CID
+        +key: E
         +value_group: fixed[8] bytes
-        +timestamp: uint64
+        +timestamp: HybridTime
     }
     Directory "1" o-- "*" Bucket : contains
     Bucket "*" o-- "*" HashEntry : contains
-    Bucket "0..1" o-- SpillPointer : spill (if external)
-    Bucket "*" o-- "*" ValueSet : external value-sets
-    ValueSet "*" o-- "*" CID : contains
-    Key <.. HashEntry : uses
-    HashEntry <.. WALRecord : referenced by
-    HashEntry <.. DeletionRecord : referenced by
-    ValueSet <.. HashEntry : referenced by
+    ValueSet <.. HashEntry : referenced via SpillPointer
+    WALRecord ..> HybridTime : contains
+    DeletionRecord ..> HybridTime : contains
 ```
 
 ---
@@ -74,8 +66,8 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 | Component         | Structure / dtype fields                                      | Size   | Description                                                      |
 |-------------------|--------------------------------------------------------------|--------|------------------------------------------------------------------|
 | Key               | `[high: u64, low: u64]`                                      | 16B    | 128-bit immutable identifier (SHA3 or composite hash)            |
-| Hash Entry        | `[key_high: u64, key_low: u64, slots: [CID, CID] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. No state mask. |
-| Value Set         | `[CID[] values, sorted_count: u32, tombstone_count: u32]`    | Var    | External dataset for high-cardinality keys; tombstone for GC     |
+| Hash Entry        | `[key_high: u64, key_low: u64, slots: [E, E] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. No state mask. |
+| Value Set         | `[E[] values, sorted_count: u32, tombstone_count: u32]`    | Var    | External dataset for high-cardinality keys; tombstone for GC     |
 | Spill Pointer     | `[ref: u64]`                                                 | 8B     | HDF5 object reference to external ValueSet (spill mode)          |
 | Deletion Record   | `[key_high: u64, key_low: u64, value_group: S8, timestamp: u64]` | 32B    | Tracks obsolete keys for GC; timestamp is Unix ns                |
 | Directory         | `[Bucket[] buckets, num_buckets: u32]`                        | Var    | Array of buckets, stored as HDF5 datasets                        |
@@ -116,12 +108,12 @@ classDiagram
         +request_id: string
     }
     class InsertMessage {
-        +key: CID
-        +value: CID
+        +key: E
+        +value: E
     }
     class DeleteMessage {
-        +key: CID
-        +value: CID (optional)
+        +key: E
+        +value: E (optional)
     }
     class BatchInsertMessage {
         +entries: InsertMessage[]
@@ -130,13 +122,13 @@ classDiagram
         +entries: DeleteMessage[]
     }
     class LookupMessage {
-        +key: CID
+        +key: E
     }
     class MetricsMessage {
         <<no additional fields>>
     }
     class LookupResponse {
-        +results: CID[]
+        +results: E[]
     }
     class MetricsResponse {
         +latency_p99: float
@@ -150,7 +142,7 @@ classDiagram
         +error_code: int
         +error_msg: string
     }
-    class CID {
+    class E {
         +high: uint64
         +low: uint64
     }
@@ -169,13 +161,13 @@ classDiagram
 | Message Type         | Fields / dtype fields                                                                 | Description                                                                 |
 |----------------------|--------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
 | BaseMessage          | `[rolling_version: uint2, op_code: Operation, request_id: string]`                   | All messages include a 2-bit rolling version, operation code, and request id|
-| InsertMessage        | `[key: CID, value: CID]`                                                             | Insert a single value for a key                                              |
-| DeleteMessage        | `[key: CID, value: CID (optional)]`                                                  | Delete a value for a key (or all values if value omitted)                    |
+| InsertMessage        | `[key: E, value: E]`                                                             | Insert a single value for a key                                              |
+| DeleteMessage        | `[key: E, value: E (optional)]`                                                  | Delete a value for a key (or all values if value omitted)                    |
 | BatchInsertMessage   | `[entries: InsertMessage[]]`                                                         | Batch insert of multiple key-value pairs                                     |
 | BatchDeleteMessage   | `[entries: DeleteMessage[]]`                                                         | Batch delete of multiple key-value pairs                                     |
-| LookupMessage        | `[key: CID]`                                                                         | Lookup all values for a key                                                  |
+| LookupMessage        | `[key: E]`                                                                         | Lookup all values for a key                                                  |
 | MetricsMessage       | `[]`                                                                                 | Request server metrics                                                       |
-| LookupResponse       | `[results: CID[]]`                                                                   | Response to a lookup, contains all values                                    |
+| LookupResponse       | `[results: E[]]`                                                                   | Response to a lookup, contains all values                                    |
 | MetricsResponse      | `[latency_p99: float, throughput_ops: float, buffer_occupancy: int, flush_duration: float, lock_contention_ratio: float, error_rate: float]` | Server metrics response                                                      |
 | ErrorResponse        | `[error_code: int, error_msg: string]`                                               | Standardized error response                                                  |
 
@@ -191,11 +183,11 @@ classDiagram
 | GET                  | Get all values for a given key                   |
 | METRICS              | Request server metrics                           |
 
-**CID Structure:**
+**E Structure:**
 
 | Field | Type    | Description         |
 |-------|---------|---------------------|
-| high  | uint64  | High 64 bits of CID |
-| low   | uint64  | Low 64 bits of CID  |
+| high  | uint64  | High 64 bits of E |
+| low   | uint64  | Low 64 bits of E  |
 
 ---
