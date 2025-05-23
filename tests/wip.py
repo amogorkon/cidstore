@@ -13,21 +13,21 @@ from cidstore.wal import WAL
 async def test_standard_workflow():
     storage = Storage(None)
     wal = WAL(None)
-    tree = CIDStore(storage, wal)
+    store = CIDStore(storage, wal)
+    await store.async_init()
 
     k = E.from_str("multi")
     a, b, c = E(1), E(2), E(3)
-    await tree.insert(k, a)
-    print(list(await tree.get(k)))
-    await tree.insert(k, b)
-    print(list(await tree.get(k)))
-    await tree.insert(k, c)
-    print(list(await tree.get(k)))
-    values = list(await tree.get(k))
+    await store.insert(k, a)
+    await asyncio.sleep(0.1)
+    print(list(await store.get(k)))
+    await store.insert(k, b)
+    print(list(await store.get(k)))
+    await store.insert(k, c)
+    print(list(await store.get(k)))
+    values = list(await store.get(k))
     assert values == [E(1), E(2), E(3)]
-
-    tree.hdf.close()
-    storage.close()
+    await store.close()
 
 
 # ===========================================
@@ -38,6 +38,7 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             print(f" ↓↓↓↓↓↓↓ {name} ↓↓↓↓↓↓")
             print(inspect.getsource(func))
+            print("----------------------------")
             if inspect.iscoroutinefunction(func):
                 asyncio.run(func())
             else:

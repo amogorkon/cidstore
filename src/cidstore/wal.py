@@ -17,8 +17,6 @@ from typing import Any
 
 import numpy as np
 
-from cidstore.keys import E
-
 try:
     from prometheus_client import Counter, Gauge
 
@@ -219,7 +217,7 @@ class WAL:
                     f"Failed to open or memory-map WAL file {wal_path}"
                 ) from e
 
-    async def consume_async(self, store, poll_interval: float = 0.1):
+    async def consume(self):
         """
         Async WAL consumer loop.
         Waits for new records using an event, with polling as fallback.
@@ -229,36 +227,19 @@ class WAL:
         """
 
         while True:
-            try:
-                # Wait for either the event or a timeout
-                await asyncio.wait_for(
-                    self._new_record_event.wait(), timeout=poll_interval
-                )
-            except asyncio.TimeoutError:
-                pass  # Timeout: fall back to polling
+            await self._new_record_event.wait()
+            await self.wal_apply()
+            self._new_record_event.clear()
 
-            with self._lock:
-                tail = self._get_tail()
-                head = self._get_head()
-                current_pos = tail
-                new_ops = []
-                while current_pos != head:
-                    rec_bytes = self._mmap[current_pos : current_pos + WAL.REC_SIZE]
-                    rec = unpack_record(rec_bytes)
-                    if rec is not None:
-                        new_ops.append(rec)
-                    current_pos += WAL.REC_SIZE
-                    if current_pos >= self.size:
-                        current_pos = WAL.HEADER_SIZE
-                if new_ops:
-                    # Apply each op to the store (off main thread)
-                    for op in new_ops:
-                        await asyncio.to_thread(store._wal_apply, op)
-                    self._set_tail(current_pos)
-                    self._mmap.flush()
-                    # Only clear the event if we actually processed new records
-                    self._new_record_event.clear()
-            # Optionally, add a stop condition or external cancellation
+    async def consume_once(self):
+        """
+        Process all new WAL records once as a single batch.
+        """
+        await self.wal_apply()
+        self._new_record_event.clear()
+
+    async def wal_apply(self):
+        raise NotImplementedError("Is assigned via store.")
 
     def _init_header(self):
         initial_pos = WAL.HEADER_SIZE
@@ -311,7 +292,7 @@ class WAL:
             wal_tail_position.set(value)
 
     async def append(self, records: list[bytes]):
-        logger.info(f"[WAL.append] Called with {len(records)} record(s)")
+        logger.info(f"[WAL.append] Called with {len(records)}")
         head = self._get_head()
         tail = self._get_tail()
         rec_area_size = self.size - WAL.HEADER_SIZE
@@ -337,23 +318,13 @@ class WAL:
                 logger.debug("WAL head wrapped around.")
         self._set_head(head)
         self._mmap.flush()
-        logger.info(
-            f"[WAL.append] Appended {len(records)} WAL record(s). New head: {head}."
-        )
+        logger.info(f"[WAL.append] Appended {len(records)}, {head=}")
         if PROMETHEUS_AVAILABLE:
             wal_records_appended.labels(operation="append").inc(len(records))
             wal_records_in_buffer.set(
                 (head - tail + rec_area_size) % rec_area_size // WAL.REC_SIZE
             )
-        # Notify async consumers that new records are available (only if in async context)
-        try:
-            loop = asyncio.get_running_loop()
-            self._new_record_event.set()
-        except RuntimeError:
-            # Not in an async context; skip setting the event for thread safety
-            logger.debug(
-                "[WAL.append] Skipped setting _new_record_event: not in async context."
-            )
+        self._new_record_event.set()
 
     def replay(self) -> list[dict[str, Any]]:
         logger.info("[WAL.replay] Called")
@@ -506,7 +477,7 @@ class WAL:
         Atomically log a batch of inserts as a single WAL transaction (TXN_START, multiple INSERT, TXN_COMMIT).
         Each item is a tuple: (k_high, k_low, v_high, v_low)
         """
-        logger.info(f"[WAL.batch_insert] Called with {len(items)} item(s)")
+        logger.info(f"[WAL.batch_insert] Called with {items=}")
         if not items:
             logger.info("[WAL.batch_insert] No items to insert.")
             return
@@ -528,14 +499,14 @@ class WAL:
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0)
         )
         await self.append(records)
-        logger.info(f"[WAL.batch_insert] Inserted {len(items)} item(s)")
+        logger.info(f"[WAL.batch_insert] Inserted {items=}")
 
     async def batch_delete(self, items: list[tuple[int, int]]) -> None:
         """
         Atomically log a batch of deletes as a single WAL transaction (TXN_START, multiple DELETE, TXN_COMMIT).
         Each item is a tuple: (k_high, k_low)
         """
-        logger.info(f"[WAL.batch_delete] Called with {len(items)} item(s)")
+        logger.info(f"[WAL.batch_delete] Called with {items=}")
         if not items:
             logger.info("[WAL.batch_delete] No items to delete.")
             return
@@ -557,10 +528,10 @@ class WAL:
             pack_record(OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0)
         )
         await self.append(records)
-        logger.info(f"[WAL.batch_delete] Deleted {len(items)} item(s)")
+        logger.info(f"[WAL.batch_delete] Deleted {items=}")
 
     async def log_delete(self, k_high, k_low, time=None):
-        logger.info(f"[WAL.log_delete] Called with k_high={k_high}, k_low={k_low}")
+        logger.info(f"[WAL.log_delete] Called with {k_high=}, {k_low=}")
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
@@ -600,25 +571,6 @@ class WAL:
         logger.info(
             f"[WAL.log_delete_value] Deleted value for k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
         )
-
-    def _wal_apply(self, op: dict[str, Any]) -> None:
-        """
-        Apply a single WAL operation.
-        Args:
-            op: WAL operation dict.
-        """
-        match op["op_type"]:
-            case OpType.INSERT.value:
-                key = E(op["k_high"], op["k_low"])
-                value = E(op["v_high"], op["v_low"])
-                self._wal_replay_insert(key, value)
-            case OpType.DELETE.value:
-                key = E(op["k_high"], op["k_low"])
-                self._wal_replay_delete(key)
-            case OpType.TXN_START.value:
-                self._wal_replay_txn_start()
-            case OpType.TXN_COMMIT.value:
-                self._wal_replay_txn_commit()
 
 
 def pack_record(

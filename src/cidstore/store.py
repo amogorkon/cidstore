@@ -15,7 +15,7 @@ import numpy as np
 
 from .keys import E
 from .storage import Storage
-from .wal import WAL
+from .wal import WAL, OpType, unpack_record
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -53,20 +53,95 @@ class CIDStore:
                 f.create_group("/buckets")
         self._load_directory()
         self._bucket_counter = 0
-        self._wal_consumer_task = asyncio.create_task(self.wal.consume_async(self))
+        self._wal_consumer_task: asyncio.Task
+        self.wal.wal_apply = self.apply
+
+    async def async_init(self) -> None:
+        self._wal_consumer_task = asyncio.create_task(self.wal.consume())
 
     async def wal_checkpoint(self):
-        await asyncio.to_thread(self.wal._checkpoint)
-        await asyncio.to_thread(self.hdf.file.flush)
-        await asyncio.to_thread(self.wal.flush)
+        await asyncio.to_thread(self._wal_checkpoint_sync)
 
-    async def batch_insert(self, items: dict[E, Iterable[E]]) -> None:
-        assert all(isinstance(k, E) for k in items)
-        assert all(isinstance(v, E) for values in items.values() for v in values)
+    def _wal_checkpoint_sync(self):
+        if hasattr(self, "wal") and hasattr(self.wal, "checkpoint"):
+            self.wal.checkpoint()
+        else:
+            if hasattr(self, "hdf") and hasattr(self.hdf, "file"):
+                self.hdf.file.flush()
+            if hasattr(self, "wal") and hasattr(self.wal, "flush"):
+                self.wal.flush()
+
+    async def compact(self):
+        await asyncio.to_thread(self._compact_all_sync)
+
+    def _compact_all_sync(self):
+        if hasattr(self, "dir"):
+            for key in list(self.dir.keys()):
+                self.compact_key(key)
+
+    async def merge(self):
+        await asyncio.to_thread(self.background_maintenance)
+
+    async def auto_tune(self, metrics):
+        await asyncio.to_thread(self._auto_tune_sync, metrics)
+
+    def _auto_tune_sync(self, metrics):
+        if not hasattr(self, "_autotune_state"):
+            self._autotune_state = {
+                "batch_size": 64,
+                "flush_interval": 1.0,
+                "error_violations": 0,
+                "latency_violations": 0,
+                "last_latency": None,
+                "integral": 0.0,
+                "prev_error": 0.0,
+            }
+        state = self._autotune_state
+        kp, ki, kd = 0.5, 0.1, 0.3
+        latency_target = 0.0001
+        min_batch, max_batch = 32, 1024
+        latency = metrics.get("latency_p99", 0.0)
+        throughput = metrics.get("throughput_ops", 0.0)
+        error_rate = metrics.get("error_rate", 0.0)
+        buffer_occupancy = metrics.get("buffer_occupancy", 0)
+        error = latency - latency_target
+        state["integral"] += error
+        derivative = error - state["prev_error"]
+        state["prev_error"] = error
+        adjustment = kp * error + ki * state["integral"] + kd * derivative
+        batch_size = state["batch_size"]
+        if error > 0 or error_rate > 0.01:
+            state["latency_violations"] += 1
+        else:
+            state["latency_violations"] = 0
+        if state["latency_violations"] >= 3 or error_rate > 0.05:
+            batch_size = max(min_batch, batch_size // 2)
+            state["latency_violations"] = 0
+        elif adjustment < 0 and buffer_occupancy > 0.8:
+            batch_size = min(max_batch, batch_size + 32)
+        state["batch_size"] = batch_size
+        flush_interval = state["flush_interval"]
+        if error > 0:
+            flush_interval = min(2.0, flush_interval * 1.1)
+        else:
+            flush_interval = max(0.1, flush_interval * 0.95)
+        state["flush_interval"] = flush_interval
+        if latency > 0.00015:
+            state["error_violations"] += 1
+        else:
+            state["error_violations"] = 0
+        if state["error_violations"] >= 5:
+            state["batch_size"] = 64
+            state["flush_interval"] = 1.0
+            state["error_violations"] = 0
+        print(
+            f"[AutoTune] batch_size={state['batch_size']} flush_interval={state['flush_interval']} latency={latency:.6f} throughput={throughput} error_rate={error_rate}"
+        )
+
+    async def batch_insert(self, items: list[tuple[E, E]]) -> None:
+        assert all(isinstance(k, E) and isinstance(v, E) for k, v in items)
         await self.wal.batch_insert([
-            (key.high, key.low, value.high, value.low)
-            for key, values in items.items()
-            for value in values
+            (key.high, key.low, value.high, value.low) for key, value in items
         ])
 
     async def batch_delete(self, keys: list[E]) -> None:
@@ -642,6 +717,7 @@ class CIDStore:
             state["batch_size"] = 64
             state["flush_interval"] = 1.0
             state["error_violations"] = 0
+
         print(
             f"[AutoTune] batch_size={state['batch_size']} flush_interval={state['flush_interval']} latency={latency:.6f} throughput={throughput} error_rate={error_rate}"
         )
@@ -655,3 +731,215 @@ class CIDStore:
             await self._save_wal()
             self.gc_thread.stop()
             await asyncio.to_thread(self.hdf.close)
+
+    async def apply(self):
+        logger.info("[CIDStore.apply] Processing WAL records")
+        with self.wal._lock:
+            tail = self.wal._get_tail()
+            head = self.wal._get_head()
+            current_pos = tail
+            new_ops = []
+            while current_pos != head:
+                rec_bytes = self.wal._mmap[current_pos : current_pos + WAL.REC_SIZE]
+                rec = unpack_record(rec_bytes)
+                if rec is not None:
+                    new_ops.append(rec)
+                current_pos += WAL.REC_SIZE
+                if current_pos >= self.wal.size:
+                    current_pos = WAL.HEADER_SIZE
+            if new_ops:
+                logger.info(
+                    f"[CIDStore.apply] Found {len(new_ops)} new operations to process"
+                )
+                for op in new_ops:
+                    op_type = op["op_type"]
+                    if op_type == OpType.INSERT.value:
+                        k_high, k_low = op["k_high"], op["k_low"]
+                        v_high, v_low = op["v_high"], op["v_low"]
+                        key = E((k_high << 64) | k_low)
+                        value = E((v_high << 64) | v_low)
+                        logger.info(
+                            f"[CIDStore.apply] Processing INSERT operation for {key=} {value=}"
+                        )
+
+                        # Get the key's bucket
+                        bucket_id = self.dir.get(key)
+                        if bucket_id is None:
+                            # Need to create a new entry in a bucket
+                            bucket_id = await self._get_bucket_id(key)
+                            self.dir[key] = bucket_id
+                            bucket_name = f"bucket_{bucket_id}"
+
+                            # Create bucket if it doesn't exist
+                            if bucket_name not in self.buckets:
+                                with self.hdf as f:
+                                    f.create_group(f"/buckets/{bucket_name}")
+
+                            # Add entry to bucket
+                            bucket = self.buckets[bucket_name]
+                            for i in range(bucket.shape[0]):
+                                if (
+                                    bucket[i]["key_high"] == 0
+                                    and bucket[i]["key_low"] == 0
+                                ):
+                                    bucket[i]["key_high"] = key.high
+                                    bucket[i]["key_low"] = key.low
+                                    bucket[i]["slots"][0] = int(value)
+                                    bucket[i]["state_mask"] = 1
+                                    bucket[i]["version"] = 1
+                                    break
+                            else:
+                                # No empty slot found, add a new one
+                                idx = bucket.shape[0]
+                                bucket.resize((idx + 1,))
+                                bucket[idx]["key_high"] = key.high
+                                bucket[idx]["key_low"] = key.low
+                                bucket[idx]["slots"][0] = int(value)
+                                bucket[idx]["state_mask"] = 1
+                                bucket[idx]["version"] = 1
+                        else:
+                            # Key exists, add value to its entry
+                            bucket_name = f"bucket_{bucket_id}"
+                            bucket = self.buckets.get(bucket_name)
+                            if bucket is not None:
+                                for i in range(bucket.shape[0]):
+                                    if (
+                                        bucket[i]["key_high"] == key.high
+                                        and bucket[i]["key_low"] == key.low
+                                    ):
+                                        # Found the entry, add the value
+                                        slots = bucket[i]["slots"]
+                                        # Check if value is already in slots
+                                        if int(value) in slots:
+                                            break
+                                        for j in range(4):
+                                            if slots[j] == 0:
+                                                slots[j] = int(value)
+                                                bucket[i]["state_mask"] = 1
+                                                bucket[i]["version"] += 1
+                                                break
+                                        else:
+                                            # All slots full, promote to spill
+                                            spill_ds_name = (
+                                                f"sp_{bucket_id}_{key.high}_{key.low}"
+                                            )
+                                            values_group = self.hdf.file["/values/sp"]
+                                            if spill_ds_name not in values_group:
+                                                # Create spill dataset with existing values + new value
+                                                slot_values = [
+                                                    v for v in slots if v != 0
+                                                ]
+                                                all_values = slot_values + [int(value)]
+                                                ds = values_group.create_dataset(
+                                                    spill_ds_name,
+                                                    shape=(len(all_values),),
+                                                    maxshape=(None,),
+                                                    dtype="<u8",
+                                                    chunks=True,
+                                                )
+                                                ds[:] = all_values
+                                                for j in range(4):
+                                                    slots[j] = 0
+                                                bucket[i]["state_mask"] = 0
+                                            else:
+                                                # Add to existing spill dataset
+                                                ds = values_group[spill_ds_name]
+                                                arr = ds[:]
+                                                if int(value) not in arr:
+                                                    ds.resize((ds.shape[0] + 1,))
+                                                    ds[-1] = int(value)
+                                        break
+                    elif op_type == OpType.DELETE.value:
+                        k_high, k_low = op["k_high"], op["k_low"]
+                        v_high, v_low = op["v_high"], op["v_low"]
+                        key = E((k_high << 64) | k_low)
+                        logger.info(
+                            f"[CIDStore.apply] Processing DELETE operation for {key=}"
+                        )
+
+                        bucket_id = self.dir.get(key)
+                        if bucket_id is not None:
+                            bucket_name = f"bucket_{bucket_id}"
+                            bucket = self.buckets.get(bucket_name)
+                            if bucket is not None:
+                                # If v_high and v_low are both 0, delete the entire key
+                                if v_high == 0 and v_low == 0:
+                                    for i in range(bucket.shape[0]):
+                                        if (
+                                            bucket[i]["key_high"] == key.high
+                                            and bucket[i]["key_low"] == key.low
+                                        ):
+                                            # Clear the entry
+                                            bucket[i]["key_high"] = 0
+                                            bucket[i]["key_low"] = 0
+                                            bucket[i]["slots"][:] = 0
+                                            bucket[i]["state_mask"] = 0
+                                            bucket[i]["version"] = 0
+
+                                            # Delete spill dataset if exists
+                                            spill_ds_name = (
+                                                f"sp_{bucket_id}_{key.high}_{key.low}"
+                                            )
+                                            values_group = self.hdf.file["/values/sp"]
+                                            if spill_ds_name in values_group:
+                                                del values_group[spill_ds_name]
+
+                                            # Remove from directory
+                                            if key in self.dir:
+                                                del self.dir[key]
+                                            break
+                                else:
+                                    # Delete specific value
+                                    value = E((v_high << 64) | v_low)
+                                    for i in range(bucket.shape[0]):
+                                        if (
+                                            bucket[i]["key_high"] == key.high
+                                            and bucket[i]["key_low"] == key.low
+                                        ):
+                                            slots = bucket[i]["slots"]
+                                            if bucket[i]["state_mask"] != 0:
+                                                # Value is inline
+                                                for j in range(4):
+                                                    if slots[j] == int(value):
+                                                        slots[j] = 0
+                                                        # Shift remaining values
+                                                        for k in range(j, 3):
+                                                            slots[k] = slots[k + 1]
+                                                        slots[3] = 0
+                                                        break
+                                            else:
+                                                # Value is in spill dataset
+                                                spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
+                                                values_group = self.hdf.file[
+                                                    "/values/sp"
+                                                ]
+                                                if spill_ds_name in values_group:
+                                                    ds = values_group[spill_ds_name]
+                                                    arr = ds[:]
+                                                    mask = arr != int(value)
+                                                    if not all(mask):
+                                                        # Value exists, remove it
+                                                        new_arr = arr[mask]
+                                                        if len(new_arr) <= 4:
+                                                            # Can demote back to inline
+                                                            for j, val in enumerate(
+                                                                new_arr
+                                                            ):
+                                                                slots[j] = val
+                                                            for j in range(
+                                                                len(new_arr), 4
+                                                            ):
+                                                                slots[j] = 0
+                                                            bucket[i]["state_mask"] = 1
+                                                            del values_group[
+                                                                spill_ds_name
+                                                            ]
+                                                        else:
+                                                            # Keep as spill but update
+                                                            ds[:] = 0  # Clear
+                                                            ds.resize((len(new_arr),))
+                                                            ds[:] = new_arr
+
+                self.wal._set_tail(current_pos)
+                self.wal._mmap.flush()
+                logger.info("[CIDStore.apply] Finished processing WAL records")

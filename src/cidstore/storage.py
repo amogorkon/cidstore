@@ -60,8 +60,7 @@ class Storage:
             groups = []
         path_str = str(self.path) if not isinstance(self.path, io.BytesIO) else None
         logger.info(
-            f"Storage initialized ({storage_type}, path={path_str}, mode={mode}, "
-            f"swmr={swmr}, groups={groups})"
+            f"Storage initialized: {storage_type=}, {path_str=}, {mode=}, {swmr=}, {groups=}"
         )
 
     def _init_root(self) -> None:

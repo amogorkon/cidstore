@@ -6,15 +6,17 @@ All tests are TDD-style and implementation-agnostic.
 
 import h5py
 
+from cidstore.store import CIDStore
+
 
 def test_hdf5_sharding_and_layout(tmp_path):
-    from cidstore.main import CIDTree
+    from cidstore.main import CIDStore
 
     path = tmp_path / "shard.h5"
-    tree = CIDTree(str(path))
+    store = CIDStore(str(path))
     # Insert enough keys to trigger sharding/hybrid directory (if supported)
     for i in range(10000):
-        tree.insert(f"shardkey{i}", i)
+        store.insert(f"shardkey{i}", i)
     with h5py.File(path, "r") as f:
         # Check for sharded/hybrid directory structure
         found_shard = any("shard" in k or "hybrid" in k for k in f.keys())
@@ -35,36 +37,30 @@ def test_hdf5_sharding_and_layout(tmp_path):
 
 
 def test_hdf5_metrics_and_logging(tmp_path):
-    from cidstore.main import CIDTree
-
     path = tmp_path / "metrics.h5"
-    tree = CIDTree(str(path))
-    tree.insert("metrics", 1)
+    store = CIDStore(str(path))
+    store.insert("metrics", 1)
     # If API exposes metrics/logging, check them
-    if hasattr(tree, "get_metrics"):
-        metrics = tree.get_metrics()
+    if hasattr(store, "get_metrics"):
+        metrics = store.get_metrics()
         assert isinstance(metrics, dict)
-    if hasattr(tree, "get_log"):
-        log = tree.get_log()
+    if hasattr(store, "get_log"):
+        log = store.get_log()
         assert isinstance(log, list)
 
 
 def test_hdf5_sharded_directory_migration(tmp_path):
     """Explicitly test sharded directory migration and verify sharded datasets."""
-    import h5py
-
-    from cidstore.main import CIDTree
-
     path = tmp_path / "sharded_dir.h5"
-    tree = CIDTree(str(path))
+    store = CIDStore(str(path))
     # Insert enough keys to trigger sharded directory migration (threshold: 1_000_000)
     SHARD_THRESHOLD = 1_000_000
     for i in range(SHARD_THRESHOLD + 10):
-        tree.insert(f"shardkey{i}", i)
+        store.insert(f"shardkey{i}", i)
     # Force migration if not already triggered
-    if hasattr(tree, "migrate_directory"):
-        tree.migrate_directory()
-    tree.file.flush()
+    if hasattr(store, "migrate_directory"):
+        store.migrate_directory()
+    store.file.flush()
     # Check that sharded directory exists and is populated
     with h5py.File(path, "r") as f:
         assert "directory" in f
