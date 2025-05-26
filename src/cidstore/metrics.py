@@ -58,7 +58,8 @@ class MetricsCollector:
             list: Prometheus metric objects if available, else empty list.
         """
         try:
-            from prometheus_client import Gauge, Info            # Define metrics
+            from prometheus_client import Gauge, Info  # Define metrics
+
             cidstore_info = Info("cidstore_info", "CIDStore information")
             split_events_counter = Gauge("cidstore_split_events", "Split events count")
             merge_events_counter = Gauge("cidstore_merge_events", "Merge events count")
@@ -120,7 +121,7 @@ class AutoTuner:
         Adjusts batch_size and flush_interval based on performance metrics.
         """
         state = self._autotune_state
-        
+
         # Extract metrics
         latency = metrics.get("latency_p99", 0.0)
         throughput = metrics.get("throughput_ops", 0.0)
@@ -132,12 +133,14 @@ class AutoTuner:
         state["integral"] += error
         derivative = error - state["prev_error"]
         state["prev_error"] = error
-        adjustment = self.kp * error + self.ki * state["integral"] + self.kd * derivative
+        adjustment = (
+            self.kp * error + self.ki * state["integral"] + self.kd * derivative
+        )
 
         # Adjust batch size based on latency and error rate
         batch_size = int(state["batch_size"])
         latency_violations = int(state["latency_violations"])
-        
+
         if error > 0 or error_rate > 0.01:
             latency_violations += 1
         else:
@@ -192,3 +195,31 @@ class AutoTuner:
     def get_autotune_state(self) -> Dict[str, Any]:
         """Get current auto-tune state for monitoring."""
         return self._autotune_state.copy()
+
+    def expose_metrics(self) -> list[Any]:
+        """
+        Expose metrics for Prometheus scraping.
+        Delegate to MetricsCollector with additional bucket/directory data.
+        Returns:
+            list: Prometheus metric objects if available, else empty list.
+        """
+        # Update metrics collector with current bucket and directory counts
+        try:
+            from prometheus_client import Gauge
+
+            # Get base metrics from collector
+            base_metrics = self.metrics_collector.expose_prometheus_metrics()
+
+            # Add store-specific metrics
+            bucket_gauge = Gauge("cidstore_buckets", "Number of buckets")
+            directory_size_gauge = Gauge("cidstore_directory_size", "Directory size")
+
+            # Set values
+            bucket_gauge.set(len(getattr(self, "buckets", {})))
+            directory_size_gauge.set(len(self.dir))
+
+            # Combine base and store-specific metrics
+            return base_metrics + [bucket_gauge, directory_size_gauge]
+        except ImportError:
+            # prometheus_client not available, return empty list
+            return []
