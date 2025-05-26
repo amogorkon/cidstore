@@ -52,91 +52,26 @@ class CIDStore:
                 f.create_group("/buckets")
         self._bucket_counter = 0
         self._wal_consumer_task: asyncio.Task
-        self.wal.wal_apply = self.apply
+        self.wal.apply = self.apply
 
     async def async_init(self) -> None:
-        self._wal_consumer_task = asyncio.create_task(self.wal.consume())
+        self._wal_consumer_task = asyncio.create_task(self.wal.consume_polling())
 
     async def wal_checkpoint(self):
-        await asyncio.to_thread(self._wal_checkpoint_sync)
-
-    def _wal_checkpoint_sync(self):
-        if hasattr(self, "wal") and hasattr(self.wal, "checkpoint"):
-            self.wal.checkpoint()
-        else:
-            if hasattr(self, "hdf") and hasattr(self.hdf, "file"):
-                self.hdf.file.flush()
-            if hasattr(self, "wal") and hasattr(self.wal, "flush"):
-                self.wal.flush()
+        self.hdf.file.flush()
+        self.wal.flush()
 
     async def compact(self):
-        await asyncio.to_thread(self._compact_all_sync)
-
-    def _compact_all_sync(self):
-        for key in list(self.dir.keys()):
+        for key in self.dir.keys():
             self.compact_key(key)
 
-    async def merge(self):
-        await asyncio.to_thread(self.background_maintenance)
 
     async def gc(self):
         await asyncio.to_thread(self.run_gc_once)
 
     async def auto_tune(self, metrics):
-        await asyncio.to_thread(self._auto_tune_sync, metrics)
-
-    def _auto_tune_sync(self, metrics):
-        if not hasattr(self, "_autotune_state"):
-            self._autotune_state = {
-                "batch_size": 64,
-                "flush_interval": 1.0,
-                "error_violations": 0,
-                "latency_violations": 0,
-                "last_latency": None,
-                "integral": 0.0,
-                "prev_error": 0.0,
-            }
-        state = self._autotune_state
-        kp, ki, kd = 0.5, 0.1, 0.3
-        latency_target = 0.0001
-        min_batch, max_batch = 32, 1024
-        latency = metrics.get("latency_p99", 0.0)
-        throughput = metrics.get("throughput_ops", 0.0)
-        error_rate = metrics.get("error_rate", 0.0)
-        buffer_occupancy = metrics.get("buffer_occupancy", 0)
-        error = latency - latency_target
-        state["integral"] += error
-        derivative = error - state["prev_error"]
-        state["prev_error"] = error
-        adjustment = kp * error + ki * state["integral"] + kd * derivative
-        batch_size = state["batch_size"]
-        if error > 0 or error_rate > 0.01:
-            state["latency_violations"] += 1
-        else:
-            state["latency_violations"] = 0
-        if state["latency_violations"] >= 3 or error_rate > 0.05:
-            batch_size = max(min_batch, batch_size // 2)
-            state["latency_violations"] = 0
-        elif adjustment < 0 and buffer_occupancy > 0.8:
-            batch_size = min(max_batch, batch_size + 32)
-        state["batch_size"] = batch_size
-        flush_interval = state["flush_interval"]
-        if error > 0:
-            flush_interval = min(2.0, flush_interval * 1.1)
-        else:
-            flush_interval = max(0.1, flush_interval * 0.95)
-        state["flush_interval"] = flush_interval
-        if latency > 0.00015:
-            state["error_violations"] += 1
-        else:
-            state["error_violations"] = 0
-        if state["error_violations"] >= 5:
-            state["batch_size"] = 64
-            state["flush_interval"] = 1.0
-            state["error_violations"] = 0
-        print(
-            f"[AutoTune] batch_size={state['batch_size']} flush_interval={state['flush_interval']} latency={latency:.6f} throughput={throughput} error_rate={error_rate}"
-        )
+        """Delegate auto-tuning to the AutoTuner component."""
+        await self.auto_tuner.auto_tune(metrics)
 
     async def batch_insert(self, items: list[tuple[E, E]]) -> None:
         assert all(isinstance(k, E) and isinstance(v, E) for k, v in items)
@@ -422,11 +357,32 @@ class CIDStore:
         """
         Delete a key.
         Args:
-            key: The key to delete.
+            key: The key to delete (E).
         If the key has multiple values, removes all values (inline and spill).
         """
+        assert hasattr(self, "dir") and isinstance(self.dir, dict)
         assert isinstance(key, E)
         asyncio.run(self.delete(key))
+
+    async def valueset_exists(self, key: E) -> bool:
+        """
+        Check if a value set exists for a key (including spilled sets).
+        """
+        assert isinstance(key, E)
+        bucket_id = self.dir.get(key)
+        if bucket_id is None:
+            return False
+        bucket = self.buckets.get(f"bucket_{bucket_id}")
+        if bucket is None:
+            return False
+        for i in range(bucket.shape[0]):
+            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
+                if bucket[i]["state_mask"] == 0:
+                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
+                    values_group = self.hdf.file["/values/sp"]
+                    return spill_ds_name in values_group
+                return any(slot != 0 for slot in bucket[i]["slots"])
+        return False
 
     def get_tombstone_count(self, key: E) -> int:
         """
@@ -495,8 +451,10 @@ class CIDStore:
         Run background GC (orphan/tombstone cleanup).
         Compacts all buckets and removes empty spill datasets.
         """
+        # Compact all buckets
         for key in list(self.dir.keys()):
-            await self.compact(key)
+            self.compact(key)
+        # Remove empty spill datasets
         values_group = self.hdf.file["/values/sp"]
         for dsname in list(values_group.keys()):
             ds = values_group[dsname]
@@ -513,55 +471,46 @@ class CIDStore:
         await self._maybe_merge_buckets()
         await self.run_gc_once()
 
-    def expose_metrics(self) -> list[Any]:
+    def apply(self, op: dict[str, Any]) -> None:
         """
-        Expose metrics for Prometheus scraping.
-        Returns:
-            list: Prometheus metric objects if available, else empty list.
+        Apply a single WAL operation.
+        Args:
+            op: WAL operation dict.
+        Supported op types:
+        - 1: Insert
+        - 2: Delete
+        - 3: Transaction start (no-op)
+        - 4: Transaction commit (no-op)
         """
-        try:
-            from prometheus_client import Gauge, Info
+        match op["op_type"]:
+            case 1:
+                key = E(op["key_high"], op["key_low"])
+                value = E(op["value_high"], op["value_low"])
+                self._wal_replay_insert(key, value)
+            case 2:
+                key = E(op["key_high"], op["key_low"])
+                self._wal_replay_delete(key)
+            case 3:
+                self._wal_replay_txn_start()
+            case 4:
+                self._wal_replay_txn_commit()
 
-            # Define metrics
-
-            cidstore_info = Info("cidstore_info", "CIDStore information")
-            bucket_gauge = Gauge("cidstore_buckets", "Number of buckets")
-            directory_size_gauge = Gauge("cidstore_directory_size", "Directory size")
-            split_events_counter = Gauge("cidstore_split_events", "Split events count")
-            merge_events_counter = Gauge("cidstore_merge_events", "Merge events count")
-            gc_runs_counter = Gauge("cidstore_gc_runs", "GC runs count")
-            last_error_info = Info("cidstore_last_error", "Last error info")
-
-            # Set metrics values
-            cidstore_info.info({"version": "1.0"})
-            bucket_gauge.set(len(self.buckets))
-            directory_size_gauge.set(len(self.dir))
-            split_events_counter.set(getattr(self, "_split_events", 0))
-            merge_events_counter.set(getattr(self, "_merge_events", 0))
-            gc_runs_counter.set(getattr(self, "_gc_runs", 0))
-            last_error_info.info({"error": getattr(self, "_last_error", "")})
-
-            # Return all defined metrics for scraping
-            return [
-                cidstore_info,
-                bucket_gauge,
-                directory_size_gauge,
-                split_events_counter,
-                merge_events_counter,
-                gc_runs_counter,
-                last_error_info,
-            ]
-        except ImportError:
-            # prometheus_client not available, return empty list
-            return []
-
-    async def _load_root(self) -> dict[str, Any] | None:
+    def _load_wal(self) -> None:
         """
-        Load the root node (if any) from the HDF5 file.
-        Returns:
-            dict or None: Root node data, or None if not present.
+        Load and apply the WAL.
+        Reads the WAL file, replays the operations, and applies them to the tree.
         """
-        return dict(self.hdf.file["/root"]) if "/root" in self.hdf.file else None
+        if self.wal:
+            self.wal.load()
+
+    def _save_wal(self) -> None:
+        """
+        Save the current state to the WAL.
+        Writes the current state of the tree to the WAL for recovery.
+        """
+        if self.wal:
+            self.wal.save()
+
 
     def __enter__(self) -> CIDStore:
         """
