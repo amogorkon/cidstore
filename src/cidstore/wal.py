@@ -217,28 +217,28 @@ class WAL:
                     f"Failed to open or memory-map WAL file {wal_path}"
                 ) from e
 
-    async def consume(self):
+    async def consume_polling(self):
         """
         Async WAL consumer loop.
         Waits for new records using an event, with polling as fallback.
         Args:
-            store: The CIDStore instance (must have an async _wal_apply method or use asyncio.to_thread).
+            store: The CIDStore instance (must have an async store.apply method or use asyncio.to_thread).
             poll_interval: Time in seconds to wait between polling for new records.
         """
 
         while True:
             await self._new_record_event.wait()
-            await self.wal_apply()
+            await self.consume()
             self._new_record_event.clear()
 
     async def consume_once(self):
         """
         Process all new WAL records once as a single batch.
         """
-        await self.wal_apply()
+        await self.consume()
         self._new_record_event.clear()
 
-    async def wal_apply(self):
+    async def consume(self):
         raise NotImplementedError("Is assigned via store.")
 
     def _init_header(self):
