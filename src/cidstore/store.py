@@ -1,20 +1,20 @@
-"""store.py - Main CIDStore class, directory, bucket, and ValueSet logic (Spec 2)"""
+"""store.py - Main CIDStore class with proper extendible hashing implementation"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 import threading
 from typing import Any
 
+import h5py
 import numpy as np
 
-from .deletion_log import BackgroundGC, DeletionLog
 from .keys import E
+from .maintenance import MaintenanceConfig, MaintenanceManager
 from .storage import Storage
-from .wal import WAL, OpType, unpack_record
+from .wal import WAL
 
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -29,9 +29,16 @@ CONF = "/config"
 
 
 class CIDStore:
+    async def auto_tune(self):
+        """Run auto-tuning feedback loop using current metrics."""
+        from .metrics import auto_tune as _auto_tune
+
+        await _auto_tune(self)
+
     """
     CIDStore: Main entry point for the CIDStore hash directory (fully async interface, sync logic).
     All public methods are async and log to WAL asynchronously.
+    Implements extendible hashing with global_depth and local_depth per Spec 3.
     """
 
     SPLIT_THRESHOLD: int = 128
@@ -40,579 +47,1422 @@ class CIDStore:
         assert isinstance(hdf, Storage), "hdf must be a Storage"
         assert isinstance(wal, WAL), "wal must be a WAL"
         self.hdf = hdf
-        self.wal = wal
-        self.dir: dict[E, int] = {}
+        self.wal = wal  # Extendible hashing components (Spec 3)
+        self.global_depth: int = 1  # Directory depth
+        self.bucket_pointers: list[dict] = []  # Array of BucketPointer entries
+        self.num_buckets: int = 0
+
         self._writer_lock = threading.RLock()
         self.hdf._init_hdf5_layout()
         self._directory_mode = "attr"
         self._directory_dataset = None
         self._directory_attr_threshold = 1000
+        self._directory_ds_threshold = (
+            100000  # Threshold for dataset → sharded migration
+        )
+        self._directory_shards = {}  # Dict of shard_id → dataset for sharded mode
         with self.hdf as f:
             if "/buckets" not in f:
                 f.create_group("/buckets")
         self._bucket_counter = 0
-        self._wal_consumer_task: asyncio.Task
-        self.wal.apply = self.apply
+        self._wal_consumer_task: asyncio.Task | None = None
+
+        # Initialize extendible hash directory
+        self._init_directory()
+
+        # Replay WAL for recovery
+        self._replay_wal()  # Initialize deletion log and background GC
+        self._init_deletion_log_and_gc()  # Initialize metrics and auto-tuning
+        self._init_metrics_and_autotune()
+
+    def _migrate_attr_to_dataset(self):
+        """Migrate directory from attribute mode to dataset mode."""
+        with self.hdf as f:
+            if "directory" not in f:
+                dtype = np.dtype([
+                    ("bucket_id", "<u8"),
+                    ("hdf5_ref", "<u8"),
+                ])
+                ds = f.create_dataset(
+                    "directory",
+                    shape=(len(self.bucket_pointers),),
+                    maxshape=(None,),
+                    dtype=dtype,
+                    chunks=True,
+                    track_times=False,
+                )
+                for i, pointer in enumerate(self.bucket_pointers):
+                    ds[i] = (pointer["bucket_id"], pointer.get("hdf5_ref", 0))
+                self._directory_mode = "ds"
+                self._directory_dataset = ds
+                logger.info(
+                    f"[CIDStore] Migrated directory to dataset mode (size={len(self.bucket_pointers)})"
+                )
+                # Optionally remove old attribute if present
+                config = f["/config"]
+                if "directory" in config.attrs:
+                    del config.attrs["directory"]
+
+    def _migrate_dataset_to_sharded(self):
+        """Migrate directory from dataset mode to sharded mode."""
+        with self.hdf as f:
+            # Create directory shards group
+            if "directory_shards" not in f:
+                f.create_group("directory_shards")
+            shards_group = f["directory_shards"]
+
+            # Calculate shard size (e.g., 50K entries per shard)
+            shard_size = 50000
+            num_shards = (len(self.bucket_pointers) + shard_size - 1) // shard_size
+
+            dtype = np.dtype([
+                ("bucket_id", "<u8"),
+                ("hdf5_ref", "<u8"),
+            ])
+
+            # Create shards and distribute directory entries
+            self._directory_shards = {}
+            for shard_id in range(num_shards):
+                shard_name = f"shard_{shard_id:04d}"
+                start_idx = shard_id * shard_size
+                end_idx = min(start_idx + shard_size, len(self.bucket_pointers))
+                shard_entries = self.bucket_pointers[start_idx:end_idx]
+
+                shard_ds = shards_group.create_dataset(
+                    shard_name,
+                    shape=(len(shard_entries),),
+                    maxshape=(None,),
+                    dtype=dtype,
+                    chunks=True,
+                    track_times=False,
+                )
+
+                for i, pointer in enumerate(shard_entries):
+                    shard_ds[i] = (pointer["bucket_id"], pointer.get("hdf5_ref", 0))
+
+                self._directory_shards[shard_id] = shard_ds
+
+            # Remove old directory dataset
+            if "directory" in f:
+                del f["directory"]
+
+            self._directory_mode = "sharded"
+            self._directory_dataset = None
+
+            # Store shard metadata
+            config = f["/config"]
+            config.attrs["directory_shard_size"] = shard_size
+            config.attrs["directory_num_shards"] = num_shards
+
+            logger.info(
+                f"[CIDStore] Migrated directory to sharded mode (size={len(self.bucket_pointers)}, shards={num_shards})"
+            )
+
+    _global_writer_lock = threading.Lock()
+
+    def acquire_global_writer_lock(self, blocking: bool = True) -> bool:
+        """Acquire the global writer lock to prevent multiple writers (SWMR)."""
+        return self._global_writer_lock.acquire(blocking=blocking)
+
+    def release_global_writer_lock(self):
+        """Release the global writer lock."""
+        self._global_writer_lock.release()
+
+    def __enter__(self):
+        self.acquire_global_writer_lock()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release_global_writer_lock()
+        if (
+            hasattr(self, "_wal_consumer_task")
+            and self._wal_consumer_task
+            and not self._wal_consumer_task.done()
+        ):
+            try:
+                self._wal_consumer_task.cancel()
+            except Exception:
+                pass  # Stop background threads        assert hasattr(self, 'maintenance_manager'), "MaintenanceManager not initialized"
+        self.maintenance_manager.stop()
+
+    def _init_deletion_log_and_gc(self):
+        # Initialize unified maintenance manager
+        maintenance_config = MaintenanceConfig(
+            gc_interval=60,
+            maintenance_interval=30,
+            sort_threshold=16,
+            merge_threshold=8,
+            wal_analysis_interval=120,
+            adaptive_maintenance_enabled=True,
+        )
+        self.maintenance_manager = MaintenanceManager(self, maintenance_config)
+        self.maintenance_manager.start()
+
+    def log_deletion(self, key: E, value: E):
+        assert hasattr(self, "maintenance_manager"), (
+            "MaintenanceManager not initialized"
+        )
+        self.maintenance_manager.log_deletion(key.high, key.low, value.high, value.low)
+
+    def run_gc_once(self):
+        # Delegate to maintenance manager
+        assert hasattr(self, "maintenance_manager"), (
+            "MaintenanceManager not initialized"
+        )
+        self.maintenance_manager.run_gc_once()
+
+    async def _maybe_merge_bucket(self, bucket_id: int, merge_threshold: int = 8):
+        """Automatically merge bucket with its pair if both are underfull and local_depth > 1."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name not in buckets_group:
+                return
+            bucket = buckets_group[bucket_name]
+            local_depth = int(bucket.attrs.get("local_depth", 1))
+            entry_count = int(bucket.attrs.get("entry_count", 0))
+            if local_depth <= 1 or entry_count > merge_threshold:
+                return
+            # Find pair bucket (differ by last local_depth bit)
+            pair_id = bucket_id ^ (1 << (local_depth - 1))
+            pair_name = f"bucket_{pair_id:04d}"
+            if pair_name not in buckets_group:
+                return
+            pair_bucket = buckets_group[pair_name]
+            pair_local_depth = int(pair_bucket.attrs.get("local_depth", 1))
+            pair_entry_count = int(pair_bucket.attrs.get("entry_count", 0))
+            if pair_local_depth != local_depth or pair_entry_count > merge_threshold:
+                return
+            # Merge buckets
+            merged_entries = list(bucket[:]) + list(pair_bucket[:])
+            # Remove both buckets
+            del buckets_group[bucket_name]
+            del buckets_group[pair_name]
+            # Create new merged bucket
+            new_bucket_id = min(bucket_id, pair_id)
+            new_bucket_name = f"bucket_{new_bucket_id:04d}"
+            hash_entry_dtype = np.dtype([
+                ("key_high", "<u8"),
+                ("key_low", "<u8"),
+                ("slots", "<u8", (2,)),
+                ("checksum", "<u8", (2,)),
+            ])
+            merged_bucket = buckets_group.create_dataset(
+                new_bucket_name,
+                shape=(len(merged_entries),),
+                maxshape=(None,),
+                dtype=hash_entry_dtype,
+                chunks=True,
+                track_times=False,
+            )
+            if merged_entries:
+                merged_bucket[:] = merged_entries
+            merged_bucket.attrs["local_depth"] = local_depth - 1
+            merged_bucket.attrs["entry_count"] = len(merged_entries)
+            merged_bucket.attrs["sorted_count"] = len(merged_entries)
+            # Update directory pointers
+            mask = (1 << (local_depth - 1)) - 1
+            for i, pointer in enumerate(self.bucket_pointers):
+                if (i & ~mask) >> (local_depth - 1) == (
+                    new_bucket_id >> (local_depth - 1)
+                ):
+                    pointer["bucket_id"] = new_bucket_id
+            self.num_buckets -= 1
+            self._save_directory_metadata()
+
+    async def maintenance(self, sort_threshold: int = 16, merge_threshold: int = 8):
+        """Background maintenance: sort/merge unsorted region and merge underfull buckets."""
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
+            for bucket_id in bucket_ids:
+                bucket = buckets_group[f"bucket_{bucket_id:04d}"]
+                sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                total = bucket.shape[0]
+                unsorted_count = total - sorted_count
+                if unsorted_count >= sort_threshold:
+                    # Merge/sort unsorted region
+                    all_entries = list(bucket[:])
+                    all_entries.sort(key=lambda e: (e["key_high"], e["key_low"]))
+                    bucket[:] = all_entries
+                    bucket.attrs["sorted_count"] = total
+                    bucket.flush()
+                entry_count = int(bucket.attrs.get("entry_count", 0))
+                local_depth = int(bucket.attrs.get("local_depth", 1))
+                if local_depth > 1 and entry_count <= merge_threshold:
+                    await self._maybe_merge_bucket(
+                        bucket_id, merge_threshold=merge_threshold
+                    )
+
+    # --- Spec 5: Multi-Value Key Promotion/Demotion and ValueSet Compaction ---
+
+    def promote_to_spill(self, key: E, new_value: E = None):
+        """Promote inline entry to ValueSet (spill) mode for a key."""
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name not in buckets_group:
+                return
+            bucket = buckets_group[bucket_name]
+            for i in range(bucket.shape[0]):
+                entry = bucket[i]
+                if entry["key_high"] == key.high and entry["key_low"] == key.low:
+                    slots = list(entry["slots"])
+                    values = [E(s) for s in slots if s != 0]
+                    if new_value is not None:
+                        values.append(new_value)
+                    sp_group = self._get_valueset_group(f)
+                    ds_name = self._get_spill_ds_name(bucket_id, key)
+                    if ds_name in sp_group:
+                        del sp_group[ds_name]
+                    ds = sp_group.create_dataset(
+                        ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
+                    )
+                    ds[:] = [int(v) for v in values]
+                    bucket[i]["slots"] = (0, int(ds.id.ref))
+                    bucket.flush()
+                    return
+
+    def demote_if_possible(self, key: E):
+        """Demote a key from spill to inline if possible (≤2 values)."""
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name not in buckets_group:
+                return
+            bucket = buckets_group[bucket_name]
+            for i in range(bucket.shape[0]):
+                entry = bucket[i]
+                if entry["key_high"] == key.high and entry["key_low"] == key.low:
+                    slots = list(entry["slots"])
+                    if slots[0] == 0 and slots[1] != 0:
+                        sp_group = self._get_valueset_group(f)
+                        ds_name = self._get_spill_ds_name(bucket_id, key)
+                        if ds_name in sp_group:
+                            ds = sp_group[ds_name]
+                            values = [E(v) for v in ds[:] if v != 0]
+                            if len(values) <= 2:
+                                new_slots = [int(v) for v in values] + [0] * (
+                                    2 - len(values)
+                                )
+                                bucket[i]["slots"] = tuple(new_slots)
+                                del sp_group[ds_name]
+                                bucket.flush()
+                    return
+
+    def compact(self, key: E):
+        """Remove tombstones (0s) from ValueSet for a key."""
+        bucket_id = self._find_bucket_id(key)
+        with self.hdf as f:
+            sp_group = self._get_valueset_group(f)
+            ds_name = self._get_spill_ds_name(bucket_id, key)
+            if ds_name in sp_group:
+                ds = sp_group[ds_name]
+                values = [v for v in ds[:] if v != 0]
+                ds.resize((len(values),))
+                ds[:] = values
+
+    # --- Spec 5: Multi-Value Key Promotion/Demotion and ValueSet Compaction ---
+
+    def is_spilled(self, key: E) -> bool:
+        """Return True if the key is in spill (ValueSet) mode."""
+        entry = self.get_entry_sync(key)
+        if entry is None:
+            return False
+        slots = entry["slots"]
+        if not isinstance(slots, (list, tuple)) or len(slots) < 2:
+            return False
+        return slots[0] == 0 and slots[1] != 0
+
+    def get_entry_sync(self, key: E):
+        # Synchronous version of get_entry for internal use
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+                if bucket_name not in buckets_group:
+                    return None
+                bucket_obj = buckets_group[bucket_name]
+                if isinstance(bucket_obj, h5py.Dataset):
+                    bucket = bucket_obj
+                    for i in range(bucket.shape[0]):
+                        entry = bucket[i]
+                        if (
+                            entry["key_high"] == key.high
+                            and entry["key_low"] == key.low
+                        ):
+                            return {
+                                "key_high": int(entry["key_high"]),
+                                "key_low": int(entry["key_low"]),
+                                "slots": list(entry["slots"]),
+                                "checksum": list(entry["checksum"]),
+                            }
+        return None
+
+    def _get_valueset_group(self, f):
+        if "/values" not in f:
+            f.create_group("/values")
+        values_group = f["/values"]
+        if isinstance(values_group, h5py.Group):
+            if "sp" not in values_group:
+                values_group.create_group("sp")
+            return values_group["sp"]
+        raise RuntimeError("/values is not a group in HDF5 file")
+
+    def _get_spill_ds_name(self, bucket_id, key):
+        return f"sp_{bucket_id}_{key.high}_{key.low}"
+
+    def _promote_to_spill(self, bucket, entry_idx, key, new_value=None):
+        """Promote inline entry to ValueSet (spill) mode."""
+        slots = list(bucket[entry_idx]["slots"])
+        values = [E(s) for s in slots if s != 0]
+        if new_value is not None:
+            values.append(new_value)
+        bucket_id = (
+            int(bucket.attrs["bucket_id"]) if "bucket_id" in bucket.attrs else None
+        )
+        if bucket_id is None:
+            # Fallback: try to find bucket_id from name
+            bucket_id = int(bucket.name.split("_")[-1])
+        with self.hdf as f:
+            sp_group = self._get_valueset_group(f)
+            ds_name = self._get_spill_ds_name(bucket_id, key)
+            if ds_name in sp_group and isinstance(sp_group, h5py.Group):
+                if isinstance(sp_group[ds_name], h5py.Dataset):
+                    del sp_group[ds_name]
+            ds = sp_group.create_dataset(
+                ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
+            )
+            ds[:] = [int(v) for v in values]
+            # Update entry to spill mode: slots[0]=0, slots[1]=spill pointer (use HDF5 object id)
+            spill_ptr = ds.id.ref
+            bucket[entry_idx]["slots"] = (0, int(spill_ptr))
+            bucket.flush()
+
+    def _demote_from_spill(self, bucket, entry_idx, key):
+        """Demote ValueSet (spill) entry to inline if <=2 values remain."""
+        bucket_id = (
+            int(bucket.attrs["bucket_id"]) if "bucket_id" in bucket.attrs else None
+        )
+        if bucket_id is None:
+            bucket_id = int(bucket.name.split("_")[-1])
+        with self.hdf as f:
+            sp_group = self._get_valueset_group(f)
+            ds_name = self._get_spill_ds_name(bucket_id, key)
+            if ds_name not in sp_group or not isinstance(sp_group, h5py.Group):
+                return
+            ds = sp_group[ds_name]
+            if not isinstance(ds, h5py.Dataset):
+                return
+            values = [E(v) for v in ds[:] if v != 0]
+            if len(values) <= 2:
+                # Demote: move values back inline, delete ValueSet
+                slots = [int(v) for v in values] + [0] * (2 - len(values))
+                bucket[entry_idx]["slots"] = tuple(slots)
+                del sp_group[ds_name]
+                bucket.flush()
 
     async def async_init(self) -> None:
-        self._wal_consumer_task = asyncio.create_task(self.wal.consume_polling())
+        if self._wal_consumer_task is None:
+            self._wal_consumer_task = asyncio.create_task(self.wal.consume_polling())
 
     async def wal_checkpoint(self):
         self.hdf.file.flush()
         self.wal.flush()
 
-    async def compact(self):
-        for key in self.dir.keys():
-            self.compact_key(key)
-
-
-    async def gc(self):
-        await asyncio.to_thread(self.run_gc_once)
-
-    async def auto_tune(self, metrics):
-        """Delegate auto-tuning to the AutoTuner component."""
-        await self.auto_tuner.auto_tune(metrics)
-
-    async def batch_insert(self, items: list[tuple[E, E]]) -> None:
-        assert all(isinstance(k, E) and isinstance(v, E) for k, v in items)
-        await self.wal.batch_insert([
-            (key.high, key.low, value.high, value.low) for key, value in items
-        ])
-
-    async def batch_delete(self, keys: list[E]) -> None:
-        assert all(isinstance(k, E) for k in keys)
-        await self.wal.batch_delete([(key.high, key.low) for key in keys])
-
-    async def insert(self, key: E, value: E) -> None:
-        logger.info(f"[CIDStore.insert] Called with {key=} {value=}")
-        assert isinstance(key, E)
-        assert isinstance(value, E)
-        assert key != E(0) != value
-        V = await self.get(key)
-        if V and value in V:
-            logger.info(f"[CIDStore.insert] Value already present for {key=}")
-            return
-        await self.wal.log_insert(key.high, key.low, value.high, value.low)
-        logger.info(f"[CIDStore.insert] Inserted value for {key=}")
-
-    async def delete(self, key: E) -> None:
-        """
-        Delete a key and all its values.
-        Args:
-            key: The key to delete (E).
-        Removes all values (inline and spill) for the key.
-        """
-        assert isinstance(key, E)
-        await self.wal.log_delete(key.high, key.low)
-
-    async def get(self, key: E) -> Iterable[E]:
-        logger.info(f"[CIDStore.get] Called with {key=}")
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            logger.info(f"[CIDStore.get] No bucket found for {key=}")
-            return iter([])
-        bucket_name = f"bucket_{bucket_id}"
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            logger.info(f"[CIDStore.get] No bucket object found for {key=}")
-            return iter([])
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                if bucket[i]["state_mask"] != 0:
-                    logger.info(f"[CIDStore.get] Returning inline values for {key=}")
-                    return (E(slot) for slot in bucket[i]["slots"] if slot != 0)
-                spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                values_group = self.hdf.file["/values/sp"]
-                if spill_ds_name in values_group:
-                    logger.info(f"[CIDStore.get] Returning spill values for {key=}")
-                    return (E(v) for v in values_group[spill_ds_name][:] if v != 0)
+    def apply(self, op: dict[str, Any]) -> None:
+        """Apply a WAL operation to the store."""
+        op_type = op.get("op_type")
+        # OpType values: 1=INSERT, 2=DELETE, 3=TXN_START, 4=TXN_COMMIT
+        if op_type == 1:  # INSERT
+            key = E((op["k_high"] << 64) | op["k_low"])
+            value = E((op["v_high"] << 64) | op["v_low"])
+            # Synchronously insert (no WAL logging)
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                coro = self.insert(key, value)
+                asyncio.ensure_future(coro)
+            else:
+                loop.run_until_complete(self.insert(key, value))
+        elif op_type == 2:  # DELETE
+            key = E((op["k_high"] << 64) | op["k_low"])
+            loop = asyncio.get_event_loop()
+            if hasattr(self, "delete"):
+                if loop.is_running():
+                    coro = self.delete(key)
+                    asyncio.ensure_future(coro)
                 else:
-                    logger.info(f"[CIDStore.get] No spill values for {key=}")
-                    return iter([])
-        logger.info(f"[CIDStore.get] Key not found in any bucket: {key=}")
-        return iter([])
+                    loop.run_until_complete(self.delete(key))
+        # Add more op_types as needed
 
-    async def get_entry(self, key: E):
-        """
-        Retrieve the entry for a key, including all canonical fields.
-        Args:
-            key: Key to retrieve (E).
-        Returns:
-            dict or None: Entry dict with key, key_high, key_low, slots, state_mask, version, values, value.
-        """
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return None
-        bucket_name = f"bucket_{bucket_id}"
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            return None
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                entry = {
-                    "key": key,
-                    "key_high": int(bucket[i]["key_high"]),
-                    "key_low": int(bucket[i]["key_low"]),
-                    "slots": bucket[i]["slots"].copy(),
-                }
-                if bucket[i]["state_mask"] == 0:
-                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                    values_group = self.hdf.file["/values/sp"]
-                    values = (
-                        [v for v in values_group[spill_ds_name][:] if v != 0]
-                        if spill_ds_name in values_group
-                        else []
-                    )
-                else:
-                    values = [slot for slot in bucket[i]["slots"] if slot != 0]
-                entry["values"] = values
-                entry["value"] = values[0] if values else None
-                return entry
-        return None
+    def _replay_wal(self):
+        """Replay WAL records to restore the store state."""
+        logger.info("[CIDStore] Replaying WAL for recovery")
+        ops = self.wal.replay()
+        for op in ops:
+            self.apply(op)
 
-    async def delete_value(self, key: E, value: E) -> None:
-        await self.wal.log_delete_value(key.high, key.low, value.high, value.low)
+    async def recover(self) -> None:
+        """Recover from WAL and replay any pending operations."""
+        logger.info("[CIDStore.recover] Starting WAL recovery")
+        await self.wal.replay()
+        logger.info("[CIDStore.recover] WAL recovery completed")
 
-    def _load_directory(self) -> None:
+    def _init_directory(self) -> None:
         """
-        Load directory from HDF5 attributes or canonical dataset (Spec 3).
+        Initialize the extendible hash directory structure.
+        Load existing directory from HDF5 or create a new one.
         """
         with self.hdf as f:
-            if "directory" in f:
-                ds = f["directory"]
-                self._directory_mode = "ds"
-                self._directory_dataset = ds
-                self.dir = {
-                    E((int(row["key_high"]) << 64) | int(row["key_low"])): int(
-                        row["bucket_id"]
-                    )
-                    for row in ds
-                }
-            elif CONF in f and "directory" in f[CONF].attrs:
-                self._directory_mode = "attr"
-                attr = f[CONF].attrs["directory"]
-                if isinstance(attr, bytes):
-                    attr = attr.decode("utf-8")
-                try:
-                    loaded = json.loads(attr)
-                except Exception:
-                    loaded = {}
-                self.dir = {
-                    E.from_str(k) if hasattr(E, "from_str") else E(int(k)): v
-                    for k, v in loaded.items()
-                }
+            config = f.require_group("/config")
+
+            # Load or initialize global_depth
+            self.global_depth = config.attrs.get("global_depth", 1)
+            self.num_buckets = config.attrs.get(
+                "num_buckets", 0
+            )  # Initialize directory with 2^global_depth entries
+            directory_size = 2**self.global_depth
+
+            if "directory_shards" in f:
+                # Load existing sharded directory
+                shards_group = f["directory_shards"]
+                self._directory_mode = "sharded"
+                self._directory_dataset = None
+                self._directory_shards = {}
+
+                # Load shard metadata
+                config = f["/config"]
+                shard_size = config.attrs.get("directory_shard_size", 50000)
+                num_shards = config.attrs.get("directory_num_shards", 0)
+
+                # Load all shards
+                self.bucket_pointers = []
+                for shard_id in range(num_shards):
+                    shard_name = f"shard_{shard_id:04d}"
+                    if shard_name in shards_group:
+                        shard_ds = shards_group[shard_name]
+                        self._directory_shards[shard_id] = shard_ds
+
+                        # Load entries from this shard
+                        for entry in shard_ds[:]:
+                            self.bucket_pointers.append({
+                                "bucket_id": int(entry["bucket_id"]),
+                                "hdf5_ref": int(entry["hdf5_ref"])
+                                if "hdf5_ref" in entry.dtype.names
+                                else 0,
+                            })
+
+                # Ensure directory is the right size
+                while len(self.bucket_pointers) < directory_size:
+                    self.bucket_pointers.append({"bucket_id": 0, "hdf5_ref": 0})
+
+            elif "directory" in f:
+                # Load existing directory dataset
+                directory_obj = f["directory"]
+                if isinstance(directory_obj, h5py.Dataset):
+                    directory_ds = directory_obj
+                    self._directory_mode = "ds"
+                    self._directory_dataset = directory_ds
+                    self.bucket_pointers = []
+                    for i in range(min(directory_size, directory_ds.shape[0])):
+                        entry = directory_ds[i]
+                        self.bucket_pointers.append({
+                            "bucket_id": int(entry["bucket_id"]),
+                            "hdf5_ref": int(entry["hdf5_ref"])
+                            if "hdf5_ref" in entry.dtype.names
+                            else 0,
+                        })
+                    # Ensure directory is the right size
+                    while len(self.bucket_pointers) < directory_size:
+                        self.bucket_pointers.append({"bucket_id": 0, "hdf5_ref": 0})
             else:
-                self._directory_mode = "attr"
-                self.dir = {}
+                # Create new directory
+                self.bucket_pointers = [
+                    {"bucket_id": 0, "hdf5_ref": 0} for _ in range(directory_size)
+                ]
 
-    async def _save_directory(self) -> None:
-        """
-        Save directory to HDF5 attributes or canonical dataset (Spec 3).
-        """
+                # Create initial bucket if none exist
+                if self.num_buckets == 0:
+                    self._create_initial_bucket()
+
+    def _create_initial_bucket(self) -> None:
+        """Create the initial bucket and update directory pointers."""
+        bucket_id = self.num_buckets
+        bucket_name = f"bucket_{bucket_id:04d}"
+
+        # Create bucket dataset in HDF5
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+                if bucket_name not in buckets_group:
+                    # Use hash_entry_dtype from specs
+                    hash_entry_dtype = np.dtype([
+                        ("key_high", "<u8"),
+                        ("key_low", "<u8"),
+                        ("slots", "<u8", (2,)),  # Simplified to 2 slots as per Spec 2
+                        ("checksum", "<u8", (2,)),  # 2 x uint64 for checksum
+                    ])
+
+                    bucket_ds = buckets_group.create_dataset(
+                        bucket_name,
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=hash_entry_dtype,
+                        chunks=True,
+                        track_times=False,
+                    )
+
+                    # Set bucket attributes
+                    bucket_ds.attrs["local_depth"] = 1
+                    bucket_ds.attrs["sorted_count"] = 0
+                    bucket_ds.attrs["entry_count"] = 0
+
+        # Update all directory pointers to point to this bucket
+        for pointer in self.bucket_pointers:
+            pointer["bucket_id"] = bucket_id
+            self.num_buckets += 1
+        self._save_directory_metadata()
+
+    def _save_directory_metadata(self) -> None:
+        """Save global_depth, num_buckets to HDF5 config and migrate directory if needed."""
+        with self.hdf as f:
+            config = f["/config"]
+            if isinstance(config, h5py.Group):
+                config.attrs["global_depth"] = self.global_depth
+                config.attrs["num_buckets"] = self.num_buckets
+                f.flush()
+        self._maybe_migrate_directory()
+        self._save_directory_to_storage()
+
+    def _maybe_migrate_directory(self):
+        """Placeholder for directory migration logic."""
+        pass
+
+    def _save_directory_to_storage(self) -> None:
+        """Save directory bucket pointers to appropriate storage format (attr/dataset/sharded)."""
         if self._directory_mode == "attr":
-            self.hdf.file[CONF].attrs.modify("dir", json.dumps(self.dir))
+            # For small directories, store as attribute (legacy mode)
+            pass  # Usually handled elsewhere for compatibility
         elif self._directory_mode == "ds":
-            ds = self._directory_dataset
-            ds.resize((len(self.dir),))
-            for i, (k, v) in enumerate(self.dir.items()):
-                key_int = int(k)
-                key_high = key_int >> 64
-                key_low = key_int & ((1 << 64) - 1)
-                ds[i]["key_high"] = key_high
-                ds[i]["key_low"] = key_low
-                ds[i]["bucket_id"] = v
-                ds[i]["spill_ptr"] = b""
-                ds[i]["state_mask"] = 0
-                ds[i]["version"] = 1
-        self.hdf.file.flush()
+            # Update existing dataset
+            if self._directory_dataset is not None:
+                self._update_directory_dataset()
+        elif self._directory_mode == "sharded":
+            # Update sharded directories
+            self._update_sharded_directory()
 
-    async def _maybe_migrate_directory(self) -> None:
-        """
-        Migrate directory from attribute to canonical, scalable, sharded/hybrid dataset.
-        Only migrates if the directory exceeds the attribute threshold.
-        """
-        if (
-            self._directory_mode != "attr"
-            or len(self.dir) <= self._directory_attr_threshold
-        ):
+    def _update_directory_dataset(self) -> None:
+        """Update directory dataset with current bucket pointers."""
+        if self._directory_dataset is None:
             return
-        f = self.hdf.file
-        dt = np.dtype([
-            ("key_high", "<u8"),
-            ("key_low", "<u8"),
-            ("bucket_id", "<i8"),
-            ("spill_ptr", "S32"),
-            ("state_mask", "u1"),
-            ("version", "<u4"),
-        ])
-        # Hybrid: single dataset if >1M buckets else sharded directory
-        SHARD_THRESHOLD = 1_000_000
-        items = list(self.dir.items())
-        if len(items) > SHARD_THRESHOLD:
-            self._shard_items_into_directory(items, f, dt)
-        else:
-            ds = f.create_dataset(
-                "dir",
-                shape=(len(items),),
-                maxshape=(None,),
-                dtype=dt,
-                chunks=True,
-                track_times=False,
+
+        # Resize dataset if needed
+        if self._directory_dataset.shape[0] < len(self.bucket_pointers):
+            self._directory_dataset.resize((len(self.bucket_pointers),))
+
+        # Update all entries
+        for i, pointer in enumerate(self.bucket_pointers):
+            self._directory_dataset[i] = (
+                pointer["bucket_id"],
+                pointer.get("hdf5_ref", 0),
             )
-            for i, (k, v) in enumerate(items):
-                ds[i]["key_high"] = k.high
-                ds[i]["key_low"] = k.low
-                ds[i]["bucket_id"] = v
-                ds[i]["spill_ptr"] = b""
-                ds[i]["state_mask"] = 0
-                ds[i]["version"] = 1
-            self._directory_mode = "ds"
-            self._directory_dataset = ds
-        # Remove old attribute
-        if CONF in f and "dir" in f[CONF].attrs:
-            f[CONF].attrs.modify("dir", None)
-        f.flush()
 
-    async def _shard_items_into_directory(self, items, f, dt):
-        SHARD_SIZE = 100_000
-        # Sharded directory: /directory/shard_{i}
-        num_shards = (len(items) + SHARD_SIZE - 1) // SHARD_SIZE
-        dir_group = f.require_group("dir")
-        for k in list(dir_group.keys()):
-            del dir_group[k]
-        for shard_idx in range(num_shards):
-            start = shard_idx * SHARD_SIZE
-            end = min((shard_idx + 1) * SHARD_SIZE, len(items))
-            shard_items = items[start:end]
-            ds = dir_group.create_dataset(
-                f"shard_{shard_idx:04d}",
-                shape=(len(shard_items),),
-                maxshape=(None,),
-                dtype=dt,
-                chunks=True,
-                track_times=False,
+    def _update_sharded_directory(self) -> None:
+        """Update sharded directory with current bucket pointers."""
+        if not self._directory_shards:
+            return
+
+        with self.hdf as f:
+            config = f["/config"]
+            shard_size = config.attrs.get("directory_shard_size", 50000)
+
+            # Calculate required number of shards
+            num_shards_needed = (
+                len(self.bucket_pointers) + shard_size - 1
+            ) // shard_size
+
+            # Ensure we have enough shards
+            shards_group = f["directory_shards"]
+            while len(self._directory_shards) < num_shards_needed:
+                shard_id = len(self._directory_shards)
+                shard_name = f"shard_{shard_id:04d}"
+
+                dtype = np.dtype([
+                    ("bucket_id", "<u8"),
+                    ("hdf5_ref", "<u8"),
+                ])
+
+                shard_ds = shards_group.create_dataset(
+                    shard_name,
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype=dtype,
+                    chunks=True,
+                    track_times=False,
+                )
+                self._directory_shards[shard_id] = shard_ds
+
+            # Update shard entries
+            for shard_id in range(num_shards_needed):
+                start_idx = shard_id * shard_size
+                end_idx = min(start_idx + shard_size, len(self.bucket_pointers))
+                shard_entries = self.bucket_pointers[start_idx:end_idx]
+
+                shard_ds = self._directory_shards[shard_id]
+
+                # Resize shard if needed
+                if shard_ds.shape[0] != len(shard_entries):
+                    shard_ds.resize((len(shard_entries),))
+
+                # Update shard entries
+                for i, pointer in enumerate(shard_entries):
+                    shard_ds[i] = (pointer["bucket_id"], pointer.get("hdf5_ref", 0))
+
+            # Update metadata
+            config.attrs["directory_num_shards"] = num_shards_needed
+
+            logger.info(
+                f"[CIDStore] Updated sharded directory metadata (shards={num_shards_needed})"
             )
-            for i, (k, v) in enumerate(shard_items):
-                ek = E.from_str(k) if isinstance(k, str) else E(k)
-                ds[i]["key_high"] = ek.high
-                ds[i]["key_low"] = ek.low
-                ds[i]["bucket_id"] = v
-                ds[i]["spill_ptr"] = b""
-                ds[i]["state_mask"] = 0
-                ds[i]["version"] = 1
-        self._directory_mode = "sharded"
-        self._directory_dataset = dir_group
 
-    async def _get_bucket_id(self, key: E) -> int:
+    def _find_bucket_id(self, key: E) -> int:
         """
-        Compute the bucket ID for a given key.
-        Args:
-            key: The key to hash (E).
-        Returns:
-            int: Bucket ID.
+        Find bucket ID for a key using extendible hashing (Spec 3).
+        Extract top global_depth bits from key.high as directory index.
         """
-        return hash(key) % max(1, len(self.buckets)) if self.buckets else 0
+        directory_index = key.high >> (64 - self.global_depth)
+        directory_index = directory_index % len(self.bucket_pointers)
+        return self.bucket_pointers[directory_index]["bucket_id"]
 
-    def __contains__(self, key: E) -> bool:
-        """
-        Check if a key is in the directory.
-        Args:
-            key: The key to check (E).
-        Returns:
-            bool: True if the key is in the directory, False otherwise.
-        """
+    async def get(self, key: E) -> list[E]:
+        """Get all values for a key using binary search in sorted region and linear scan in unsorted region."""
+        logger.info(f"[CIDStore.get] Called with {key=}")
         assert isinstance(key, E)
-        return key in self.dir
 
-    def __getitem__(self, key: E) -> set[E]:
-        """
-        Get the value for a key.
-        Args:
-            key: The key to lookup (E).
-        Returns:
-            The value associated with the key.
-        Raises:
-            KeyError: If the key is not found.
-        """
-        assert isinstance(key, E)
-        entry = asyncio.run(self.get(key))
-        if entry is not None:
-            return {E(e) for e in entry}
-        raise KeyError(f"Key not found: {key}")
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = f"bucket_{bucket_id:04d}"
 
-    def __setitem__(self, key: E, value: E) -> None:
-        """
-        Set the value for a key.
-        Args:
-            key: The key to set.
-            value: The value to add to the set of values of key.
-        """
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if not isinstance(buckets_group_obj, h5py.Group):
+                return []
+            buckets_group = buckets_group_obj
+            if bucket_name not in buckets_group:
+                logger.info(f"[CIDStore.get] No bucket found for {key=}")
+                return []
+
+            bucket_obj = buckets_group[bucket_name]
+            if not isinstance(bucket_obj, h5py.Dataset):
+                return []
+            bucket = bucket_obj
+
+            sorted_count = int(bucket.attrs.get("sorted_count", 0))
+            total = bucket.shape[0]
+
+            # --- Binary search in sorted region ---
+            left, right = 0, sorted_count - 1
+            while left <= right:
+                mid = (left + right) // 2
+                entry = bucket[mid]
+                entry_key = (entry["key_high"], entry["key_low"])
+                search_key = (key.high, key.low)
+                if entry_key == search_key:
+                    # Found in sorted region
+                    if len(entry["slots"]) > 0 and entry["slots"][0] != 0:
+                        return [E(slot) for slot in entry["slots"] if slot != 0]
+                    else:
+                        # Check for spilled values
+                        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
+                        values_group_obj = f.get("/values/sp")
+                        if values_group_obj and isinstance(
+                            values_group_obj, h5py.Group
+                        ):
+                            if spill_ds_name in values_group_obj:
+                                spill_ds_obj = values_group_obj[spill_ds_name]
+                                if isinstance(spill_ds_obj, h5py.Dataset):
+                                    return [E(v) for v in spill_ds_obj[:] if v != 0]
+                        return []
+                elif entry_key < search_key:
+                    left = mid + 1
+                else:
+                    right = mid - 1
+
+            # --- Linear scan in unsorted region ---
+            for i in range(sorted_count, total):
+                entry = bucket[i]
+                if entry["key_high"] == key.high and entry["key_low"] == key.low:
+                    if len(entry["slots"]) > 0 and entry["slots"][0] != 0:
+                        return [E(slot) for slot in entry["slots"] if slot != 0]
+                    else:
+                        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
+                        values_group_obj = f.get("/values/sp")
+                        if values_group_obj and isinstance(
+                            values_group_obj, h5py.Group
+                        ):
+                            if spill_ds_name in values_group_obj:
+                                spill_ds_obj = values_group_obj[spill_ds_name]
+                                if isinstance(spill_ds_obj, h5py.Dataset):
+                                    return [E(v) for v in spill_ds_obj[:] if v != 0]
+                        return []
+
+        return []
+
+    async def get_entry(self, key: E) -> dict[str, Any] | None:
+        """Get bucket entry for a key (for debugging and testing), using binary search in sorted region and linear scan in unsorted region."""
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = f"bucket_{bucket_id:04d}"
+
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if not isinstance(buckets_group_obj, h5py.Group):
+                return None
+            buckets_group = buckets_group_obj
+            if bucket_name not in buckets_group:
+                return None
+
+            bucket_obj = buckets_group[bucket_name]
+            if not isinstance(bucket_obj, h5py.Dataset):
+                return None
+            bucket = bucket_obj
+
+            sorted_count = int(bucket.attrs.get("sorted_count", 0))
+            total = bucket.shape[0]
+
+            # --- Binary search in sorted region ---
+            left, right = 0, sorted_count - 1
+            while left <= right:
+                mid = (left + right) // 2
+                entry = bucket[mid]
+                entry_key = (entry["key_high"], entry["key_low"])
+                search_key = (key.high, key.low)
+                if entry_key == search_key:
+                    return {
+                        "key_high": int(entry["key_high"]),
+                        "key_low": int(entry["key_low"]),
+                        "slots": list(entry["slots"]),
+                        "checksum": list(entry["checksum"]),
+                    }
+                elif entry_key < search_key:
+                    left = mid + 1
+                else:
+                    right = mid - 1
+
+            # --- Linear scan in unsorted region ---
+            for i in range(sorted_count, total):
+                entry = bucket[i]
+                if entry["key_high"] == key.high and entry["key_low"] == key.low:
+                    return {
+                        "key_high": int(entry["key_high"]),
+                        "key_low": int(entry["key_low"]),
+                        "slots": list(entry["slots"]),
+                        "checksum": list(entry["checksum"]),
+                    }
+
+        return None
+
+    async def insert(self, key: E, value: E) -> None:
+        """Insert a key-value pair, appending to the unsorted region."""
+        logger.info(f"[CIDStore.insert] Called with {key=}, {value=}")
         assert isinstance(key, E)
         assert isinstance(value, E)
-        asyncio.run(self.insert(key, value))
 
-    def __delitem__(self, key: E) -> None:
-        """
-        Delete a key.
-        Args:
-            key: The key to delete (E).
-        If the key has multiple values, removes all values (inline and spill).
-        """
-        assert hasattr(self, "dir") and isinstance(self.dir, dict)
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = (
+            f"bucket_{bucket_id:04d}"  # Record operation in WAL pattern analyzer
+        )
+        # Record operation for WAL analysis
+        assert hasattr(self, "maintenance_manager"), (
+            "MaintenanceManager not initialized"
+        )
+        assert hasattr(self.maintenance_manager, "wal_analyzer_thread"), (
+            "WAL analyzer thread not initialized"
+        )  # Extract bucket ID from bucket name for WAL analysis
+        try:
+            bucket_id = int(bucket_name.split("_")[-1]) if "_" in bucket_name else 0
+            self.maintenance_manager.wal_analyzer_thread.record_operation(
+                bucket_id, 1
+            )  # Insert operation
+        except (ValueError, IndexError):
+            pass  # Skip recording if bucket name format is unexpected
+
+        # Log to WAL
+        await self.wal.log_insert(key.high, key.low, value.high, value.low)
+
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+
+                if bucket_name not in buckets_group:
+                    # Create new bucket
+                    hash_entry_dtype = np.dtype([
+                        ("key_high", "<u8"),
+                        ("key_low", "<u8"),
+                        ("slots", "<u8", (2,)),
+                        ("checksum", "<u8", (2,)),
+                    ])
+                    bucket_ds = buckets_group.create_dataset(
+                        bucket_name,
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=hash_entry_dtype,
+                        chunks=True,
+                        track_times=False,
+                    )
+                    bucket_ds.attrs["local_depth"] = 1
+                    bucket_ds.attrs["sorted_count"] = 0
+                    bucket_ds.attrs["entry_count"] = 0
+                else:
+                    bucket_obj = buckets_group[bucket_name]
+                    if isinstance(bucket_obj, h5py.Dataset):
+                        bucket_ds = bucket_obj
+                    else:
+                        return  # Invalid bucket type
+
+                # Always append new entry to the unsorted region
+                # sorted_count = int(bucket_ds.attrs.get("sorted_count", 0))
+                total = bucket_ds.shape[0]
+
+                # Search for existing entry in both regions
+                found_entry_idx = None
+                for i in range(total):
+                    entry = bucket_ds[i]
+                    if entry["key_high"] == key.high and entry["key_low"] == key.low:
+                        found_entry_idx = i
+                        break
+
+                if found_entry_idx is not None:
+                    entry = bucket_ds[found_entry_idx]
+                    slots = list(entry["slots"])
+                    # If already in spill mode, append to ValueSet
+                    if slots[0] == 0 and slots[1] != 0:
+                        bucket_id = (
+                            int(bucket_ds.attrs["bucket_id"])
+                            if "bucket_id" in bucket_ds.attrs
+                            else bucket_id
+                        )
+                        with self.hdf as f2:
+                            sp_group = self._get_valueset_group(f2)
+                            ds_name = self._get_spill_ds_name(bucket_id, key)
+                            if ds_name in sp_group:
+                                ds = sp_group[ds_name]
+                                values = list(ds[:])
+                                if int(value) not in values:
+                                    values.append(int(value))
+                                    ds.resize((len(values),))
+                                    ds[:] = values
+                        return
+                    # Inline mode
+                    if int(value) not in slots:
+                        if slots.count(0) == 0:
+                            self._promote_to_spill(
+                                bucket_ds, found_entry_idx, key, new_value=value
+                            )
+                        else:
+                            for j in range(len(slots)):
+                                if slots[j] == 0:
+                                    slots[j] = int(value)
+                                    break
+                            new_entry = (
+                                entry["key_high"],
+                                entry["key_low"],
+                                tuple(slots),
+                                entry["checksum"],
+                            )
+                            bucket_ds[found_entry_idx] = new_entry
+                else:
+                    # Append new entry to the end (unsorted region)
+                    new_entry = (key.high, key.low, (int(value), 0), (0, 0))
+                    old_size = bucket_ds.shape[0]
+                    bucket_ds.resize((old_size + 1,))
+                    bucket_ds[old_size] = new_entry
+                    bucket_ds.attrs["entry_count"] = (
+                        old_size + 1
+                    )  # Check if bucket needs splitting
+                if bucket_ds.shape[0] >= self.SPLIT_THRESHOLD:
+                    await self._maybe_split_bucket(bucket_id)
+
+    async def _maybe_split_bucket(self, bucket_id: int) -> None:
+        """Split bucket if it's over threshold (adaptive based on danger score) and has sufficient local depth."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+
+                if bucket_name in buckets_group:
+                    bucket_obj = buckets_group[bucket_name]
+                    if isinstance(bucket_obj, h5py.Dataset):
+                        bucket_ds = bucket_obj
+                        local_depth = bucket_ds.attrs.get("local_depth", 1)
+                        entry_count = bucket_ds.attrs.get(
+                            "entry_count", bucket_ds.shape[0]
+                        )
+
+                        # Use default split threshold (simplified)
+                        adaptive_threshold = self.SPLIT_THRESHOLD
+
+                        logger.info(
+                            f"[_maybe_split_bucket] {bucket_name}: entries={entry_count}, "
+                            f"using_threshold={adaptive_threshold}"
+                        )
+
+                        if entry_count >= adaptive_threshold:
+                            if local_depth < self.global_depth:
+                                # Can split without doubling directory
+                                await self._split_bucket(bucket_id)
+                            elif local_depth == self.global_depth:
+                                # Need to double directory first
+                                self._double_directory()
+                                await self._split_bucket(bucket_id)
+
+    def _double_directory(self) -> None:
+        """Double the directory size (increase global_depth by 1)."""
+        self.global_depth += 1
+
+        # Double the bucket_pointers array
+        old_pointers = self.bucket_pointers.copy()
+        self.bucket_pointers = old_pointers + old_pointers
+
+        # For sharded mode, we might need to expand shards or create new ones
+        if self._directory_mode == "sharded":
+            with self.hdf as f:
+                config = f["/config"]
+                shard_size = config.attrs.get("directory_shard_size", 50000)
+
+                # Calculate if we need more shards
+                num_shards_needed = (
+                    len(self.bucket_pointers) + shard_size - 1
+                ) // shard_size
+                current_num_shards = len(self._directory_shards)
+
+                if num_shards_needed > current_num_shards:
+                    # Create additional shards
+                    shards_group = f["directory_shards"]
+                    dtype = np.dtype([
+                        ("bucket_id", "<u8"),
+                        ("hdf5_ref", "<u8"),
+                    ])
+
+                    for shard_id in range(current_num_shards, num_shards_needed):
+                        shard_name = f"shard_{shard_id:04d}"
+                        shard_ds = shards_group.create_dataset(
+                            shard_name,
+                            shape=(0,),
+                            maxshape=(None,),
+                            dtype=dtype,
+                            chunks=True,
+                            track_times=False,
+                        )
+                        self._directory_shards[shard_id] = shard_ds
+
+        self._save_directory_metadata()
+
+    async def _split_bucket(self, bucket_id: int) -> None:
+        """Split a bucket into two buckets."""
+        old_bucket_name = f"bucket_{bucket_id:04d}"
+        new_bucket_id = self.num_buckets
+        new_bucket_name = f"bucket_{new_bucket_id:04d}"
+
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+
+                old_bucket_obj = buckets_group[old_bucket_name]
+                if isinstance(old_bucket_obj, h5py.Dataset):
+                    old_bucket = old_bucket_obj
+
+                    # Create new bucket with same structure
+                    new_bucket = buckets_group.create_dataset(
+                        new_bucket_name,
+                        shape=(0,),
+                        maxshape=(None,),
+                        dtype=old_bucket.dtype,
+                        chunks=True,
+                        track_times=False,
+                    )
+
+                    local_depth = old_bucket.attrs.get("local_depth", 1)
+                    new_local_depth = local_depth + 1
+
+                    new_bucket.attrs["local_depth"] = new_local_depth
+                    old_bucket.attrs["local_depth"] = new_local_depth
+                    new_bucket.attrs["sorted_count"] = 0
+                    new_bucket.attrs["entry_count"] = 0
+
+                    # Redistribute entries based on key bits
+                    await self._redistribute_bucket_entries(
+                        bucket_id, new_bucket_id, new_local_depth
+                    )
+
+                    self.num_buckets += 1
+                    self._save_directory_metadata()
+
+    async def _redistribute_bucket_entries(
+        self, old_bucket_id: int, new_bucket_id: int, local_depth: int
+    ) -> None:
+        """Redistribute entries between old and new bucket based on key bit patterns."""
+        old_bucket_name = f"bucket_{old_bucket_id:04d}"
+        new_bucket_name = f"bucket_{new_bucket_id:04d}"
+
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+
+                old_bucket_obj = buckets_group[old_bucket_name]
+                new_bucket_obj = buckets_group[new_bucket_name]
+
+                if isinstance(old_bucket_obj, h5py.Dataset) and isinstance(
+                    new_bucket_obj, h5py.Dataset
+                ):
+                    old_bucket = old_bucket_obj
+                    new_bucket = new_bucket_obj
+
+                    # Read all entries from old bucket
+                    old_entries = old_bucket[:]
+
+                    old_bucket_entries = []
+                    new_bucket_entries = []
+
+                    # Redistribute based on key bit pattern
+                    for entry in old_entries:
+                        key_high = entry["key_high"]
+                        bit_index = 64 - local_depth
+                        bit_value = (key_high >> bit_index) & 1
+
+                        if bit_value == 0:
+                            old_bucket_entries.append(entry)
+                        else:
+                            new_bucket_entries.append(entry)
+
+                    # Update buckets with redistributed entries
+                    if old_bucket_entries:
+                        old_bucket.resize((len(old_bucket_entries),))
+                        old_bucket[:] = old_bucket_entries
+                    else:
+                        old_bucket.resize((0,))
+
+                    if new_bucket_entries:
+                        new_bucket.resize((len(new_bucket_entries),))
+                        new_bucket[:] = new_bucket_entries  # Update entry counts
+                    old_bucket.attrs["entry_count"] = len(old_bucket_entries)
+                    new_bucket.attrs["entry_count"] = len(
+                        new_bucket_entries
+                    )  # Update directory pointers
+                    self._update_directory_pointers_after_split(
+                        old_bucket_id, new_bucket_id, local_depth
+                    )
+
+    async def run_adaptive_maintenance(self) -> None:
+        """Perform simplified adaptive maintenance based on operation patterns."""
+        logger.info(
+            "[adaptive_maintenance] Starting adaptive maintenance check"
+        )  # Get insights from simplified WAL analyzer
+        assert hasattr(self, "maintenance_manager"), (
+            "MaintenanceManager not initialized"
+        )
+        assert hasattr(self.maintenance_manager, "wal_analyzer_thread"), (
+            "WAL analyzer thread not initialized"
+        )
+
+        insights = self.maintenance_manager.wal_analyzer_thread.get_insights()
+        logger.info(f"[adaptive_maintenance] Processing {len(insights)} insights")
+
+        for insight in insights:
+            try:
+                bucket_id = insight.bucket_id
+                operation_count = insight.operation_count
+
+                logger.info(
+                    f"[adaptive_maintenance] Processing bucket {bucket_id} "
+                    f"(operations={operation_count}): {insight.suggestion}"
+                )
+
+                # Check if bucket needs splitting based on high activity
+                with self.hdf as f:
+                    bucket_name = f"bucket_{bucket_id:04d}"
+                    buckets_group = f["/buckets"]
+
+                    if bucket_name in buckets_group:
+                        bucket = buckets_group[bucket_name]
+                        entry_count = bucket.attrs.get("entry_count", bucket.shape[0])
+
+                        # Lower threshold for high-activity buckets
+                        threshold = max(self.SPLIT_THRESHOLD // 2, 64)
+
+                        if entry_count >= threshold:
+                            logger.info(
+                                f"[adaptive_maintenance] Triggering split for {bucket_name} "
+                                f"(entries={entry_count}, threshold={threshold})"
+                            )
+                            await self._maybe_split_bucket(bucket_id)
+
+            except Exception as e:
+                logger.warning(
+                    f"[adaptive_maintenance] Failed to process insight for bucket {insight.bucket_id}: {e}"
+                )
+
+        logger.info(
+            f"[adaptive_maintenance] Completed ({len(insights)} insights processed)"
+        )
+
+    def _update_directory_pointers_after_split(
+        self, old_bucket_id: int, new_bucket_id: int, local_depth: int
+    ) -> None:
+        """Update directory pointers after bucket split."""
+        for i, pointer in enumerate(self.bucket_pointers):
+            if pointer["bucket_id"] == old_bucket_id:
+                # Check if this directory entry should point to new bucket
+                directory_bit_pos = self.global_depth - local_depth
+                if directory_bit_pos >= 0:
+                    bit_value = (i >> directory_bit_pos) & 1
+
+                    if bit_value == 1:
+                        pointer["bucket_id"] = new_bucket_id
+
+    async def delete(self, key: E) -> None:
+        """Delete all values for a key and log the deletion."""
+        logger.info(f"[CIDStore.delete] Called with {key=}")
         assert isinstance(key, E)
-        asyncio.run(self.delete(key))
 
-    async def valueset_exists(self, key: E) -> bool:
-        """
-        Check if a value set exists for a key (including spilled sets).
-        """
+        # Get all current values for the key first
+        values = await self.lookup(key)
+
+        # Delete each value individually to ensure proper logging
+        for value in values:
+            await self.delete_value(key, value)
+
+        # Log to WAL
+        await self.wal.log_delete_key(key.high, key.low)
+
+    async def delete_value(self, key: E, value: E) -> None:
+        """Delete a specific value from a key and log the deletion."""
+        logger.info(f"[CIDStore.delete_value] Called with {key=}, {value=}")
         assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return False
-        bucket = self.buckets.get(f"bucket_{bucket_id}")
-        if bucket is None:
-            return False
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                if bucket[i]["state_mask"] == 0:
-                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                    values_group = self.hdf.file["/values/sp"]
-                    return spill_ds_name in values_group
-                return any(slot != 0 for slot in bucket[i]["slots"])
-        return False
+        assert isinstance(value, E)
 
-    def get_tombstone_count(self, key: E) -> int:
-        """
-        Count tombstones (zeros) in the spill dataset for a key.
-        """
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return 0
-        bucket = self.buckets.get(f"bucket_{bucket_id}")
-        if bucket is None:
-            return 0
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                if bucket[i]["state_mask"] == 0:
-                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                    values_group = self.hdf.file["/values/sp"]
-                    if spill_ds_name in values_group:
-                        ds = values_group[spill_ds_name]
-                        return int((ds[:] == 0).sum())
-                return 0
-        return 0
+        bucket_id = self._find_bucket_id(key)
+        bucket_name = (
+            f"bucket_{bucket_id:04d}"  # Record operation in WAL pattern analyzer
+        )
+        # Record deletion operation for WAL analysis
+        assert hasattr(self, "maintenance_manager"), (
+            "MaintenanceManager not initialized"
+        )
+        assert hasattr(self.maintenance_manager, "wal_analyzer_thread"), (
+            "WAL analyzer thread not initialized"
+        )
+        try:
+            bucket_id = int(bucket_name.split("_")[-1]) if "_" in bucket_name else 0
+            self.maintenance_manager.wal_analyzer_thread.record_operation(
+                bucket_id, 2
+            )  # Delete operation
+        except (ValueError, IndexError):
+            pass
 
-    async def is_spilled(self, key: E) -> bool:
-        """
-        Check if a key has spilled values (i.e., if a spill dataset exists).
-        """
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return False
-        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-        values_group = self.hdf.file["/values/sp"]
-        return spill_ds_name in values_group
+        # Log to WAL
+        await self.wal.log_delete(key.high, key.low, value.high, value.low)
 
-    async def demote_if_possible(self, key: E) -> None:
-        """
-        Move spilled values back to inline slots if possible (<=4 values).
-        If the spill dataset has <= 4 values, moves them back to inline slots and deletes the spill.
-        """
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return
-        bucket = self.buckets.get(bucket_id)
-        if bucket is None:
-            return
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
-                if bucket[i]["state_mask"] == 0:
-                    spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-                    values_group = self.hdf.file["/values/sp"]
-                    if spill_ds_name in values_group:
-                        ds = values_group[spill_ds_name]
-                        arr = ds[:]
-                        arr = arr[arr != 0]
-                        if len(arr) <= 4:
-                            bucket[i]["slots"][:] = 0
-                            for j, v in enumerate(arr):
-                                bucket[i]["slots"][j] = v
-                            del values_group[spill_ds_name]
-                break
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
 
-    async def gc(self) -> None:
-        """
-        Run background GC (orphan/tombstone cleanup).
-        Compacts all buckets and removes empty spill datasets.
-        """
-        # Compact all buckets
-        for key in list(self.dir.keys()):
-            self.compact(key)
-        # Remove empty spill datasets
-        values_group = self.hdf.file["/values/sp"]
-        for dsname in list(values_group.keys()):
-            ds = values_group[dsname]
-            if ds.shape[0] == 0 or all(ds[:] == 0):
-                del values_group[dsname]
-        self.hdf.file.flush()
+                if bucket_name in buckets_group:
+                    bucket_obj = buckets_group[bucket_name]
+                    if isinstance(bucket_obj, h5py.Dataset):
+                        bucket = bucket_obj
 
-    async def maintain(self) -> None:
-        """
-        Run background merge/sort/compaction for all buckets.
-        Merges unsorted regions, merges underfilled buckets, and runs GC.
-        """
-        await self.background_bucket_maintenance()
-        await self._maybe_merge_buckets()
-        await self.run_gc_once()
+                        # Find and update the entry
+                        for i in range(bucket.shape[0]):
+                            entry = bucket[i]
+                            if (
+                                entry["key_high"] == key.high
+                                and entry["key_low"] == key.low
+                            ):
+                                slots = list(entry["slots"])
 
-    def apply(self, op: dict[str, Any]) -> None:
-        """
-        Apply a single WAL operation.
-        Args:
-            op: WAL operation dict.
-        Supported op types:
-        - 1: Insert
-        - 2: Delete
-        - 3: Transaction start (no-op)
-        - 4: Transaction commit (no-op)
-        """
-        match op["op_type"]:
-            case 1:
-                key = E(op["key_high"], op["key_low"])
-                value = E(op["value_high"], op["value_low"])
-                self._wal_replay_insert(key, value)
-            case 2:
-                key = E(op["key_high"], op["key_low"])
-                self._wal_replay_delete(key)
-            case 3:
-                self._wal_replay_txn_start()
-            case 4:
-                self._wal_replay_txn_commit()
+                                # Remove value from slots (set to 0)
+                                for j in range(len(slots)):
+                                    if slots[j] == int(value):
+                                        slots[j] = 0
+                                        # Log the deletion
+                                        self.log_deletion(key, value)
+                                        break
 
-    def _load_wal(self) -> None:
-        """
-        Load and apply the WAL.
-        Reads the WAL file, replays the operations, and applies them to the tree.
-        """
-        if self.wal:
-            self.wal.load()
+                                # Update entry
+                                new_entry = (
+                                    entry["key_high"],
+                                    entry["key_low"],
+                                    tuple(slots),
+                                    entry["checksum"],
+                                )
+                                bucket[i] = new_entry
+                                break
 
-    def _save_wal(self) -> None:
-        """
-        Save the current state to the WAL.
-        Writes the current state of the tree to the WAL for recovery.
-        """
-        if self.wal:
-            self.wal.save()
+    async def rebalance_buckets(self) -> None:
+        """Rebalance buckets by merging underfilled ones."""
+        logger.info("[CIDStore.rebalance_buckets] Starting bucket rebalancing")
 
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
 
-    def __enter__(self) -> CIDStore:
-        """
-        Enter the runtime context related to this object.
-        Returns:
-            CIDStore: The CIDStore instance.
-        """
-        return self
+            for bucket_id in bucket_ids:
+                await self._maybe_merge_bucket(bucket_id)
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """
-        Exit the runtime context related to this object.
-        Closes the CIDStore instance.
-        """
-        asyncio.run(self.close())
+        logger.info("[CIDStore.rebalance_buckets] Bucket rebalancing completed")
 
-    def __repr__(self) -> str:
-        """
-        Return a string representation of the CIDStore instance.
-        Returns:
-            str: String representation.
-        """
-        return f"<CIDStore buckets={len(self.buckets)} directory_size={len(self.dir)}>"
+    # Context management
 
-    def __len__(self) -> int:
-        """
-        Return the number of keys in the directory.
-        Returns:
-            int: Number of keys.
-        """
-        return len(self.dir)
-
+    # Debug and utility methods
     def debug_dump(self) -> str:
-        """
-        Debug: Dump the entire tree structure.
-        Returns:
-            str: String representation of the entire tree.
-        """
-        output = [f"CIDStore debug dump (buckets={len(self.buckets)})"]
-        output.extend(self.debug_dump_bucket(bucket_id) for bucket_id in self.buckets)
+        """Return debug information about the store structure."""
+        output = [
+            f"CIDStore debug dump (global_depth={self.global_depth}, num_buckets={self.num_buckets})"
+        ]
+        output.append(f"Directory size: {len(self.bucket_pointers)}")
+
+        # Directory pointers
+        for i, pointer in enumerate(self.bucket_pointers):
+            output.append(f"  Dir[{i:04d}] -> Bucket {pointer['bucket_id']}")
+
+        # Bucket details
+        for bucket_id in range(self.num_buckets):
+            output.append(self.debug_dump_bucket(bucket_id))
+
         return "\n".join(output)
 
     def debug_dump_bucket(self, bucket_id: int) -> str:
-        """
-        Debug: Dump the contents of a bucket.
-        Args:
-            bucket_id: The ID of the bucket to dump.
-        Returns:
-            str: String representation of the bucket contents.
-        """
-        bucket = self.buckets.get(bucket_id)
-        if bucket is None:
-            return "Bucket not found"
-        sorted_count = int(bucket.attrs.get("sorted_count", 0))
-        unsorted_count = bucket.shape[0] - sorted_count
-        return (
-            f"Bucket {bucket_id}:\n"
-            f"  Sorted count: {sorted_count}\n"
-            f"  Unsorted count: {unsorted_count}\n"
-            f"  Entries:\n"
-            + "\n".join(
-                f"    {i}: key_high={bucket[i]['key_high']} key_low={bucket[i]['key_low']} "
-                f"slots={bucket[i]['slots']} state_mask={bucket[i]['state_mask']} "
-                f"version={bucket[i]['version']}"
-                for i in range(bucket.shape[0])
-            )
-        )
+        """Return debug information about a specific bucket."""
+        bucket_name = f"bucket_{bucket_id:04d}"
 
-    def _add_value_to_bucket_entry(
-        self, bucket, entry_idx: int, key: E, value: E
-    ) -> None:
-        """
-        Helper to add a value to a bucket entry, handling slots, spill promotion, and state mask update.
-        """
-        slots = bucket[entry_idx]["slots"]
-        for j in range(4):
-            if slots[j] == 0:
-                slots[j] = int(value)
-                bucket[entry_idx]["version"] += 1
-                bucket.file.flush()
-                return
-        # All slots full, promote to spill
-        bucket_id = self.dir[key]
-        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-        values_group = self.file["/values/sp"]
-        if spill_ds_name not in values_group:
-            slot_values = [v for v in slots if v != 0]
-            all_values = slot_values + [int(value)]
-            ds = values_group.create_dataset(
-                spill_ds_name,
-                shape=(len(all_values),),
-                maxshape=(None,),
-                dtype="<u8",
-                chunks=True,
-            )
-            ds[:] = all_values
-            for j in range(4):
-                slots[j] = 0
-        else:
-            ds = values_group[spill_ds_name]
-            arr = ds[:]
-            if int(value) not in arr:
-                ds.resize((ds.shape[0] + 1,))
-                ds[-1] = int(value)
-        bucket[entry_idx]["state_mask"] = 0
+        with self.hdf as f:
+            buckets_group_obj = f["/buckets"]
+            if isinstance(buckets_group_obj, h5py.Group):
+                buckets_group = buckets_group_obj
+
+                if bucket_name in buckets_group:
+                    bucket_obj = buckets_group[bucket_name]
+                    if isinstance(bucket_obj, h5py.Dataset):
+                        bucket = bucket_obj
+                        local_depth = bucket.attrs.get("local_depth", 1)
+                        entry_count = bucket.attrs.get("entry_count", 0)
+
+                        output = [
+                            f"Bucket {bucket_id}:",
+                            f"  Local depth: {local_depth}",
+                            f"  Entry count: {entry_count}",
+                            "  Entries:",
+                        ]
+
+                        for i in range(bucket.shape[0]):
+                            entry = bucket[i]
+                            key = E((entry["key_high"] << 64) | entry["key_low"])
+                            slots = [s for s in entry["slots"] if s != 0]
+                            output.append(f"    {key} -> {slots}")
+
+                        return "\n".join(output)
+
+        return f"Bucket {bucket_id}: Not found"
+
+    def _init_metrics_and_autotune(self):
+        """Initialize metrics collection and auto-tuning."""
+        from .metrics import init_metrics_and_autotune
+
+        init_metrics_and_autotune(self)
+
+    # --- Spec 3: Sorted/Unsorted Region Support ---
+    def get_sorted_count(self, bucket_id: int) -> int:
+        """Return the number of sorted entries in the bucket."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name in buckets_group:
+                bucket = buckets_group[bucket_name]
+                if hasattr(bucket, "attrs"):
+                    return int(bucket.attrs.get("sorted_count", 0))
+        return 0
+
+    def get_unsorted_count(self, bucket_id: int) -> int:
+        """Return the number of unsorted entries in the bucket."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name in buckets_group:
+                bucket = buckets_group[bucket_name]
+                if hasattr(bucket, "shape") and hasattr(bucket, "attrs"):
+                    total = bucket.shape[0]
+                    sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                    return total - sorted_count
+        return 0
+
+    def get_sorted_region(self, bucket_id: int):
+        """Return the sorted region (as a list of entries) of the bucket."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name in buckets_group:
+                bucket = buckets_group[bucket_name]
+                if hasattr(bucket, "attrs"):
+                    sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                    return list(bucket[:sorted_count])
+        return []
+
+    def get_unsorted_region(self, bucket_id: int):
+        """Return the unsorted region (as a list of entries) of the bucket."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name in buckets_group:
+                bucket = buckets_group[bucket_name]
+                if hasattr(bucket, "attrs"):
+                    sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                    return list(bucket[sorted_count:])
+        return []
+
+    def sort_bucket(self, bucket_id: int):
+        """Sort the unsorted region and merge it into the sorted region."""
+        bucket_name = f"bucket_{bucket_id:04d}"
+        with self.hdf as f:
+            buckets_group = f["/buckets"]
+            if bucket_name in buckets_group:
+                bucket = buckets_group[bucket_name]
+                sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                total = bucket.shape[0]
+                if sorted_count < total:
+                    # Merge unsorted region into sorted region
+                    all_entries = list(bucket[:])
+                    # Sort all by key_high, key_low
+                    all_entries.sort(key=lambda e: (e["key_high"], e["key_low"]))
+                    bucket[:] = all_entries
+                    bucket.attrs["sorted_count"] = total
+                    bucket.flush()
+
+    def get_tombstone_count(self, key: E) -> int:
+        """Count tombstones (zeros) in the slots for a given key."""
+        entry = self.get_entry_sync(key)
+        if entry is None:
+            return 0
+
+        slots = entry["slots"]
+        if not isinstance(slots, (list, tuple)):
+            return 0
+
+        return sum(1 for slot in slots if slot == 0)
+
+    async def valueset_exists(self, key: E) -> bool:
+        """Check if a valueset exists for the given key."""
+        bucket_id = self._find_bucket_id(key)
+        with self.hdf as f:
+            sp_group = self._get_valueset_group(f)
+            ds_name = self._get_spill_ds_name(bucket_id, key)
+            return ds_name in sp_group
