@@ -15,8 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 try:
     from prometheus_client import Counter, Gauge
 
@@ -60,15 +58,9 @@ try:
 except ImportError:
     PROMETHEUS_AVAILABLE = False
 
-HASH_ENTRY_DTYPE = np.dtype([
-    ("k_high", "<u8"),
-    ("k_low", "<u8"),
-    ("slots", "<u8", 4),
-    ("state_mask", "u1"),
-    ("version", "<u4"),
-])
 
 logger = logging.getLogger(__name__)
+
 if not logger.hasHandlers():
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
@@ -128,6 +120,9 @@ class WAL:
         path: Path | None = None,
         size: int | None = None,
     ) -> None:
+        """
+        Initialize WAL. If path is None, use an in-memory mmap buffer (for tests or ephemeral use).
+        """
         self.path = path
         self.size = size or self.DEFAULT_WAL_SIZE
         self._wal_seq: int = 0
