@@ -27,7 +27,6 @@ async def test_standard_workflow():
     print(list(await store.get(k)))
     values = list(await store.get(k))
     assert values == [E(1), E(2), E(3)]
-    await store.close()
 
 
 # ===========================================
