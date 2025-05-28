@@ -223,3 +223,28 @@ class AutoTuner:
         except ImportError:
             # prometheus_client not available, return empty list
             return []
+
+
+def init_metrics_and_autotune(store_instance):
+    """Initialize metrics and auto-tuner for a CIDStore instance."""
+    store_instance.metrics_collector = MetricsCollector()
+    store_instance.auto_tuner = AutoTuner()
+
+
+def update_metric(store_instance, name: str, value: float) -> None:
+    if hasattr(store_instance, "metrics_collector"):
+        store_instance.metrics_collector.update_metric(name, value)
+
+
+async def get_metrics(store_instance):
+    if hasattr(store_instance, "metrics_collector"):
+        return store_instance.metrics_collector.get_metrics()
+    return {}
+
+
+async def auto_tune(store_instance):
+    if hasattr(store_instance, "auto_tuner") and hasattr(
+        store_instance, "metrics_collector"
+    ):
+        metrics = store_instance.metrics_collector.get_metrics()
+        await store_instance.auto_tuner.auto_tune(metrics)
