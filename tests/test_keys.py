@@ -1,23 +1,25 @@
 # Additional tests for CID, immutability, and ValueSet/HashEntry integration
+
+import tempfile
+
+import pytest
+
 from cidstore.keys import E
+from cidstore.store import WAL, CIDStore, Storage
+
+pytestmark = pytest.mark.asyncio
 
 
-def test_cid_in_valueset_and_hashentry():
+async def test_cid_in_valueset_and_hashentry():
     # Simulate ValueSet and HashEntry usage
-    import tempfile
-
-    from cidstore.main import CIDTree
-
     with tempfile.TemporaryDirectory() as tmp:
-        from cidstore.store import WAL, Storage
-
         storage = Storage(f"{tmp}/test.h5")
         wal = WAL(None)
-        tree = CIDTree(storage, wal=wal)
+        store = CIDStore(storage, wal=wal)
         key = E(0x11112222333344445555666677778888)
         value = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
-        tree.insert(key, value)
-        result = list(tree.get(key))
+        await store.insert(key, value)
+        result = await store.get(key)
         assert value in result or int(value) in [int(x) for x in result]
 
 

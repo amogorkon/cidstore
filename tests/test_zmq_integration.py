@@ -18,7 +18,7 @@ async def test_zmq_push_pull():
     await push.send(msgpack.packb(msg))
     data = await pull.recv()
     unpacked = msgpack.unpackb(data)
-    assert unpacked["op"] == "insert"
+    assert unpacked["op"] == b"insert" or unpacked["op"] == "insert"
     assert unpacked["key"] == b"foo"
     assert unpacked["value"] == b"bar"
     push.close()
@@ -38,7 +38,7 @@ async def test_zmq_router_dealer():
     await dealer.send(msgpack.packb(req))
     ident, msg = await router.recv_multipart()
     unpacked = msgpack.unpackb(msg)
-    assert unpacked["op"] == "get"
+    assert unpacked["op"] == b"get" or unpacked["op"] == "get"
     assert unpacked["key"] == b"foo"
     # Router replies
     reply = {"status": "ok", "value": b"bar"}

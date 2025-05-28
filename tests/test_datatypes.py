@@ -4,7 +4,11 @@ Covers canonical data types, key/value encoding, and structure (E class, ValueSe
 All tests are TDD-style and implementation-agnostic.
 """
 
+import pytest
+
 from cidstore.keys import E
+
+pytestmark = pytest.mark.asyncio
 
 
 def test_e_high_low():
@@ -26,24 +30,24 @@ def test_e_to_from_hdf5():
     assert int(e2) == int(e)
 
 
-def test_e_in_valueset_and_hashentry(directory):
+async def test_e_in_valueset_and_hashentry(directory):
     """Test that E can be used as a key and value in ValueSet/HashEntry."""
     key = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
     value = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
-    directory.insert(key, value)
-    result = list(directory.lookup(key))
+    await directory.insert(key, value)
+    result = await directory.lookup(key)
     assert value in result or int(value) in [int(x) for x in result]
     value = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
-    directory.insert(key, value)
-    result = list(directory.lookup(key))
+    await directory.insert(key, value)
+    result = await directory.lookup(key)
     assert value in result or int(value) in [int(x) for x in result]
     key2 = E(0x11112222333344445555666677778888)
     value2 = E(0x9999AAAABBBBCCCCDDDDEEEEFFFF0000)
-    directory.insert(key2, value2)
-    result = list(directory.lookup(key2))
+    await directory.insert(key2, value2)
+    result = await directory.lookup(key2)
     assert value2 in result or int(value2) in [int(x) for x in result]
     # Spec 2: Check canonical structure of HashEntry and ValueSet (new model)
-    entry = directory.get_entry(key2)
+    entry = await directory.get_entry(key2)
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry
@@ -59,7 +63,7 @@ def test_e_in_valueset_and_hashentry(directory):
     if "sorted_count" in entry:
         assert isinstance(entry["sorted_count"], int)
     # Repeat for key
-    entry = directory.get_entry(key)
+    entry = await directory.get_entry(key)
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry

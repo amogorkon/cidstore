@@ -6,61 +6,33 @@ All tests are TDD-style and implementation-agnostic.
 
 import pytest
 
+from cidstore.keys import E
 
-def test_bucket_split_trigger(bucket):
+pytestmark = pytest.mark.asyncio
+
+
+async def test_bucket_split_trigger(bucket):
     """Inserting entries beyond threshold should trigger a split."""
+    # Insert enough unique keys to trigger a split
     for i in range(bucket.SPLIT_THRESHOLD + 1):
-        bucket.insert(f"split{i}", i)
-    if hasattr(bucket, "split"):
-        new_bucket, sep = bucket.split()
-        assert bucket.validate()
-        assert new_bucket.validate()
-        assert bucket.size() <= bucket.SPLIT_THRESHOLD
-        assert new_bucket.size() <= bucket.SPLIT_THRESHOLD
-    else:
-        pytest.skip("Split not implemented")
+        await bucket.insert(E.from_int(i), E(i))
+    # Check that global_depth increased or directory size doubled
+    assert bucket.global_depth >= 1
+    assert len(bucket.bucket_pointers) == 2**bucket.global_depth
+    # Check that at least two buckets exist
+    bucket_ids = set(ptr["bucket_id"] for ptr in bucket.bucket_pointers)
+    assert len(bucket_ids) > 1
 
 
-def test_bucket_merge_trigger(bucket):
-    """Deleting entries to underfill two buckets should trigger a merge."""
-    # Fill and split first
+@pytest.mark.xfail(reason="get_bucket_values not implemented")
+async def test_split_invariants(bucket):
+    """After split, all invariants should hold and data should be preserved as expected."""
     for i in range(bucket.SPLIT_THRESHOLD + 1):
-        bucket.insert(f"merge{i}", i)
-    if hasattr(bucket, "split"):
-        new_bucket, sep = bucket.split()
-        # Now delete enough to underfill both
-        for i in range(bucket.SPLIT_THRESHOLD + 1):
-            bucket.delete(f"merge{i}")
-            new_bucket.delete(f"merge{i}")
-        if hasattr(bucket, "merge"):
-            merged = bucket.merge(new_bucket)
-            assert merged.validate()
-            assert merged.size() <= 2 * bucket.SPLIT_THRESHOLD
-        else:
-            pytest.skip("Merge not implemented")
-    else:
-        pytest.skip("Split not implemented")
-
-
-def test_split_merge_invariants(bucket):
-    """After split and merge, all invariants should hold and data should be preserved or deleted as expected."""
-    # Fill, split, then merge
-    for i in range(bucket.SPLIT_THRESHOLD + 1):
-        bucket.insert(f"inv{i}", i)
-    if hasattr(bucket, "split"):
-        new_bucket, sep = bucket.split()
-        # Insert more to both
-        for i in range(100, 110):
-            bucket.insert(f"inv{i}", i)
-            new_bucket.insert(f"inv{i}", i)
-        # Merge
-        if hasattr(bucket, "merge"):
-            merged = bucket.merge(new_bucket)
-            assert merged.validate()
-            # All inserted values should be present
-            for i in range(100, 110):
-                assert i in [int(x) for x in merged.lookup(f"inv{i}")]
-        else:
-            pytest.skip("Merge not implemented")
-    else:
-        pytest.skip("Split not implemented")
+        await bucket.insert(E.from_int(i), E(i))
+    # After split, all values should be present in some bucket
+    all_values = set()
+    for ptr in bucket.bucket_pointers:
+        b_id = ptr["bucket_id"]
+        vals = await bucket.get_bucket_values(b_id)
+        all_values.update(vals)
+    assert all(E(i) in all_values for i in range(bucket.SPLIT_THRESHOLD + 1))

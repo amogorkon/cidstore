@@ -1,104 +1,95 @@
-import threading
+import asyncio
 
 import pytest
 
 from cidstore.keys import E
 
-# Directory/Bucket Spec Compliance Tests (TDD, Hash Directory Model)
-# All tests are spec-driven and implementation-agnostic.
+pytestmark = pytest.mark.asyncio
+
+import pytest
+
+pytestmark = pytest.mark.asyncio
 
 
-def test_sorted_unsorted_region(directory):
+@pytest.mark.xfail(
+    reason="Sorted/unsorted region logic not implemented", raises=AttributeError
+)
+async def test_sorted_unsorted_region(directory):
     """Insert values and check sorted/unsorted region logic per spec 3."""
-    key = "sorttest"
+    key = E.from_str("sorttest")
     for i in range(1, 11):
-        directory.insert(key, i)
-    if hasattr(directory, "get_sorted_count"):
-        assert directory.get_sorted_count(key) >= 0
-        # Optionally, check sorted region is sorted
-        sorted_region = directory.get_sorted_region(key)
-        assert sorted_region == sorted(sorted_region)
-    else:
-        pytest.skip("Sorted/unsorted region logic not implemented")
+        await directory.insert(key, E(i))
+    assert await directory.get_sorted_count(key) >= 0
+    # Optionally, check sorted region is sorted
+    sorted_region = await directory.get_sorted_region(key)
+    assert sorted_region == sorted(sorted_region)
 
 
-def test_directory_resize_and_migration(tree):
+@pytest.mark.xfail(reason="directory_type not implemented", raises=AttributeError)
+async def test_directory_resize_and_migration(tree):
     # Insert enough keys to trigger directory resize/migration per spec 3
     for i in range(1, 10001):
-        tree.insert(f"dir{i}", E(i))
-    # If API exposes directory type, check migration
-    if hasattr(tree, "directory_type"):
-        dtype = tree.directory_type()
-        assert dtype in ("attribute", "dataset")
-        # If migration occurred, validate all keys are still present
-        if dtype == "dataset":
-            for i in range(10000):
-                result = list(tree.lookup(f"dir{i}"))
-                assert len(result) == 1
-                assert int(result[0]) == i
+        await tree.insert(E.from_str(f"dir{i}"), E(i))
+    dtype = await tree.directory_type()
+    assert dtype in ("attribute", "dataset")
+    # If migration occurred, validate all keys are still present
+    if dtype == "dataset":
+        for i in range(10000):
+            result = await tree.get(E.from_str(f"dir{i}"))
+            assert len(result) == 1
+            assert int(result[0]) == i
     # TODO: If migration/maintenance API is available, check atomic switch and data integrity
 
 
-def test_spill_pointer_and_large_valueset(tree):
+@pytest.mark.xfail(reason="has_spill_pointer not implemented", raises=AttributeError)
+async def test_spill_pointer_and_large_valueset(tree):
     # Insert enough values to trigger ValueSet spill (external dataset)
-    key = "spill"
+    key = E.from_str("spill")
     for i in range(1, 1001):
-        tree.insert(key, E(i))
-    # If API exposes spill pointer, check it
-    if hasattr(tree, "has_spill_pointer"):
-        assert tree.has_spill_pointer(key)
-    # TODO: If directory migration is triggered by ValueSet spill, check directory state
+        await tree.insert(key, E(i))
+    assert await tree.has_spill_pointer(key)
 
 
-def test_state_mask_ecc(tree):
-    key = "ecc"
+@pytest.mark.xfail(reason="get_state_mask not implemented", raises=AttributeError)
+async def test_state_mask_ecc(tree):
+    key = E.from_str("ecc")
     for i in range(1, 5):
-        tree.insert(key, E(i))
-    tree.delete(key)
-    # If API exposes state mask, check ECC encoding/decoding
-    if hasattr(tree, "get_state_mask"):
-        mask = tree.get_state_mask(key)
-        assert isinstance(mask, int)
-        # Optionally, inject bitflip and check correction
-        if hasattr(tree, "check_and_correct_state_mask"):
-            tree.check_and_correct_state_mask(key)
-    # TODO: If metrics/logging/tracing APIs are available, check for merge/GC events
-
+        await tree.insert(key, E(i))
+    await tree.delete(key)
+    mask = await tree.get_state_mask(key)
+    assert isinstance(mask, int)
+    # Optionally, inject bitflip and check correction
+    await tree.check_and_correct_state_mask(key)
     # Spec 2: ECC-protected state mask must correct single-bit errors and detect double-bit errors
-    if hasattr(tree, "get_state_mask"):
-        mask = tree.get_state_mask(key)
-        # Inject single-bit error and check correction
-        if hasattr(tree, "set_state_mask") and hasattr(
-            tree, "check_and_correct_state_mask"
-        ):
-            orig_mask = mask
-            for bit in range(8):
-                corrupted = orig_mask ^ (1 << bit)
-                tree.set_state_mask(key, corrupted)
-                tree.check_and_correct_state_mask(key)
-                assert tree.get_state_mask(key) == orig_mask
-            # Inject double-bit error and check detection (should not correct)
-            corrupted = orig_mask ^ 0b11
-            tree.set_state_mask(key, corrupted)
-            tree.check_and_correct_state_mask(key)
-            assert tree.get_state_mask(key) != orig_mask
+    mask = await tree.get_state_mask(key)
+    orig_mask = mask
+    for bit in range(8):
+        corrupted = orig_mask ^ (1 << bit)
+        await tree.set_state_mask(key, corrupted)
+        await tree.check_and_correct_state_mask(key)
+        assert await tree.get_state_mask(key) == orig_mask
+    # Inject double-bit error and check detection (should not correct)
+    corrupted = orig_mask ^ 0b11
+    await tree.set_state_mask(key, corrupted)
+    await tree.check_and_correct_state_mask(key)
+    assert await tree.get_state_mask(key) != orig_mask
 
 
-def test_btree_initialization(tree):
+async def test_btree_initialization(tree):
     assert tree is not None
 
 
-def test_btree_insert(tree):
-    tree.insert("key", 123)
-    result = list(tree.lookup("key"))
+async def test_btree_insert(tree):
+    await tree.insert("key", 123)
+    result = await tree.lookup("key")
     assert len(result) == 1
     assert int(result[0]) == 123
 
 
-def test_btree_delete(tree):
-    tree.insert("key", 123)
-    tree.delete("key")
-    result = list(tree.lookup("key"))
+async def test_btree_delete(tree):
+    await tree.insert("key", 123)
+    await tree.delete("key")
+    result = await tree.lookup("key")
     assert result == []
 
 
@@ -106,29 +97,27 @@ def test_btree_delete(tree):
 
 
 # 3. Multi-value key promotion (mocked logic)
-def test_multi_value_promotion(tree):
+async def test_multi_value_promotion(tree):
     # Insert the same key many times to trigger promotion logic
     key = "multi"
     for i in range(1, 201):
-        tree.insert(key, E(i))
+        await tree.insert(key, E(i))
     # Should still be able to look up all values (mocked logic)
     # (In real impl, would check value-list dataset)
-    result = list(tree.lookup(key))
+    result = await tree.lookup(key)
     assert 200 in [int(x) for x in result]
 
 
-def test_split_and_merge(directory):
+@pytest.mark.xfail(reason="Split/merge logic not implemented", raises=AttributeError)
+async def test_split_and_merge(directory):
     """Insert enough keys to trigger a split; merging should restore invariants (Spec 3, 6)."""
     for i in range(1, directory.SPLIT_THRESHOLD + 2):
-        directory.insert(f"split{i}", i)
-    if hasattr(directory, "split"):
-        new_dir, sep = directory.split()
-        assert directory.validate()
-        assert new_dir.validate()
-        assert directory.size() <= directory.SPLIT_THRESHOLD
-        assert new_dir.size() <= directory.SPLIT_THRESHOLD
-    else:
-        pytest.skip("Split/merge logic not implemented")
+        await directory.insert(f"split{i}", i)
+    new_dir, sep = await directory.split()
+    assert await directory.validate()
+    assert await new_dir.validate()
+    assert await directory.size() <= directory.SPLIT_THRESHOLD
+    assert await new_dir.size() <= directory.SPLIT_THRESHOLD
 
 
 # ---
@@ -139,34 +128,29 @@ def test_split_and_merge(directory):
 # - Document any missing features or APIs as not covered
 
 
-def test_deletion_and_gc(directory):
+@pytest.mark.xfail(reason="compact not implemented", raises=AttributeError)
+async def test_deletion_and_gc(directory):
     """Insert, delete, and check GC/compaction per spec 7."""
     for i in range(1, 11):
-        directory.insert(f"delgc{i}", i)
+        await directory.insert(f"delgc{i}", i)
     for i in range(1, 11):
-        directory.delete(f"delgc{i}")
+        await directory.delete(f"delgc{i}")
     for i in range(1, 11):
-        result = list(directory.lookup(f"delgc{i}"))
+        result = await directory.lookup(f"delgc{i}")
         assert result == []
-    if hasattr(directory, "compact"):
-        for i in range(1, 11):
-            directory.compact(f"delgc{i}")
+    for i in range(1, 11):
+        await directory.compact(f"delgc{i}")
 
 
-def test_concurrent_insert(directory):
+async def test_concurrent_insert(directory):
     """Simulate concurrent inserts and check for correct multi-value behavior (Spec 8)."""
     results = []
 
-    def writer():
-        directory.insert("swmr", 123)
-        results.append(directory.lookup("swmr"))
+    async def writer():
+        await directory.insert("swmr", 123)
+        results.append(await directory.lookup("swmr"))
 
-    t1 = threading.Thread(target=writer)
-    t2 = threading.Thread(target=writer)
-    t1.start()
-    t2.start()
-    t1.join()
-    t2.join()
+    await asyncio.gather(writer(), writer())
     for r in results:
         assert 123 in [int(x) for x in r]
 
@@ -184,67 +168,68 @@ def test_concurrent_insert(directory):
         ("e", 5),
     ],
 )
-def test_insert_and_lookup(tree, key, value):
-    tree.insert(key, value)
-    result = list(tree.lookup(key))
+@pytest.mark.asyncio
+async def test_insert_and_lookup(tree, key, value):
+    await tree.insert(key, value)
+    result = await tree.lookup(key)
     assert len(result) == 1
     # Accept either E or int/str for test compatibility
     assert int(result[0]) == value
 
 
-def test_overwrite(tree):
-    tree.insert("dup", E(1))
-    tree.insert("dup", E(2))
-    result = list(tree.lookup("dup"))
+async def test_overwrite(tree):
+    await tree.insert("dup", E(1))
+    await tree.insert("dup", E(2))
+    result = await tree.lookup("dup")
     # Multi-value: both values should be present
     assert set(result) == {E(1), E(2)}
 
 
-def test_delete(tree):
-    tree.insert("x", 42)
-    result = list(tree.lookup("x"))
+async def test_delete(tree):
+    await tree.insert("x", 42)
+    result = await tree.lookup("x")
     assert len(result) == 1
     assert int(result[0]) == 42
-    tree.delete("x")
-    result = list(tree.lookup("x"))
+    await tree.delete("x")
+    result = await tree.lookup("x")
     assert result == []
 
 
-def test_multiple_inserts_and_deletes(directory):
+async def test_multiple_inserts_and_deletes(directory):
     items = [(f"k{i}", i) for i in range(1, 11)]
     for k, v in items:
-        directory.insert(k, v)
+        await directory.insert(k, v)
     for k, v in items:
-        result = list(directory.lookup(k))
+        result = await directory.lookup(k)
         assert len(result) == 1
         assert int(result[0]) == int(v)
     for k, _ in items:
-        directory.delete(k)
+        await directory.delete(k)
     for k, _ in items:
-        result = list(directory.lookup(k))
+        result = await directory.lookup(k)
         assert result == []
 
 
-def test_nonexistent_key(directory):
+async def test_nonexistent_key(directory):
     """Lookup for a key that was never inserted should return an empty result."""
-    result = list(directory.lookup("notfound"))
+    result = await directory.lookup("notfound")
     assert result == []
 
 
-def test_bulk_insert(directory):
+async def test_bulk_insert(directory):
     for i in range(1, 101):
-        directory.insert(f"bulk{i}", i)
+        await directory.insert(f"bulk{i}", i)
     for i in range(1, 101):
-        result = list(directory.lookup(f"bulk{i}"))
+        result = await directory.lookup(f"bulk{i}")
         assert len(result) == 1
         assert int(result[0]) == i
 
 
-def test_bulk_delete(directory):
+async def test_bulk_delete(directory):
     for i in range(1, 101):
-        directory.insert(f"del{i}", i)
+        await directory.insert(f"del{i}", i)
     for i in range(1, 101):
-        directory.delete(f"del{i}")
+        await directory.delete(f"del{i}")
     for i in range(1, 101):
-        result = list(directory.lookup(f"del{i}"))
+        result = await directory.lookup(f"del{i}")
         assert result == []
