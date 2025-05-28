@@ -163,8 +163,12 @@ class Storage:
         try:
             path = self.path
             if isinstance(path, io.BytesIO):
-                # In-memory HDF5 file
-                self.file = h5py.File(path, mode)
+                # In-memory HDF5 file - use mode 'w' for fresh BytesIO to avoid corruption
+                if mode == "a" and path.tell() == 0 and len(path.getvalue()) == 0:
+                    # Fresh empty buffer, use 'w' to create new file
+                    self.file = h5py.File(path, "w")
+                else:
+                    self.file = h5py.File(path, mode)
             else:
                 # Use Path for filesystem paths
                 if isinstance(path, Path):
@@ -206,13 +210,14 @@ class Storage:
             finally:
                 self.file = None
 
-    # Context‐manager support
-    def __enter__(self) -> h5py.File:
+    # Context‐manager support    def __enter__(self) -> h5py.File:
         """
         Enter the runtime context related to this object.
         Returns the opened HDF5 file.
         """
-        # No assert needed, open() will check
+        # If file is already open, return it; otherwise open it
+        if self.file is not None:
+            return self.file
         return self.open()
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
