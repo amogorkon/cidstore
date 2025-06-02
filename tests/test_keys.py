@@ -44,7 +44,7 @@ def test_to_from_hdf5():
     """Test that converting to HDF5 and back preserves the key."""
     orig = E(0xFEDCBA0987654321FEDCBA0987654321)
     arr = orig.to_hdf5()
-    reconstructed = E.from_hdf5(arr)
+    reconstructed = E.from_entry(arr)
     assert reconstructed == orig
 
 

@@ -13,13 +13,12 @@ from cidstore.wal import WAL
 async def test_standard_workflow():
     storage = Storage(None)
     wal = WAL(None)
-    store = CIDStore(storage, wal)
+    store = CIDStore(storage, wal, testing=True)
     await store.async_init()
 
     k = E.from_str("multi")
     a, b, c = E(1), E(2), E(3)
     await store.insert(k, a)
-    await asyncio.sleep(0.1)
     print(list(await store.get(k)))
     await store.insert(k, b)
     print(list(await store.get(k)))

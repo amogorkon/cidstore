@@ -44,7 +44,7 @@ async def test_inline_slots_two_values():
         assert value2 in values
 
         # Verify both values are stored inline (not spilled)
-        bucket_id = store._find_bucket_id(key)
+        bucket_id = store._bucket_name_and_id(key)
         bucket_name = f"bucket_{bucket_id:04d}"
 
         with store.hdf as f:
@@ -97,7 +97,7 @@ async def test_inline_slots_promotion_to_spill():
         assert value3 in values
 
         # Verify that values are now in a spilled ValueSet
-        bucket_id = store._find_bucket_id(key)
+        bucket_id = store._bucket_name_and_id(key)
         bucket_name = f"bucket_{bucket_id:04d}"
 
         with store.hdf as f:
@@ -192,7 +192,7 @@ async def test_inline_slots_empty_handling():
         assert value1 in values
 
         # Verify slot structure
-        bucket_id = store._find_bucket_id(key)
+        bucket_id = store._bucket_name_and_id(key)
         bucket_name = f"bucket_{bucket_id:04d}"
 
         with store.hdf as f:

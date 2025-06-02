@@ -26,7 +26,7 @@ def test_e_to_from_hdf5():
     value = (0x1234567890ABCDEF << 64) | 0x0FEDCBA098765432
     e = E(value)
     h5 = e.to_hdf5()
-    e2 = E.from_hdf5(h5)
+    e2 = E.from_entry(h5)
     assert int(e2) == int(e)
 
 

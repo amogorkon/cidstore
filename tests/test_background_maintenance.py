@@ -82,7 +82,7 @@ async def test_background_sort_unsorted_regions():
     try:
         # Try to access internal methods if available
         if hasattr(store, "_find_bucket_id"):
-            bucket_id = store._find_bucket_id(test_key1)
+            bucket_id = store._bucket_name_and_id(test_key1)
             unsorted_count = store.get_unsorted_count(bucket_id)
             assert unsorted_count >= 0  # Should have some entries
 
