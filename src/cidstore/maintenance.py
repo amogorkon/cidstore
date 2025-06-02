@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from . import wal_analyzer
-from .dtypes import DELETION_RECORD_DTYPE
+from .constants import DELETION_RECORD_DTYPE, OpType
+from .utils import assumption
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +88,10 @@ class DeletionLog:
         self, key_high: int, key_low: int, value_high: int, value_low: int
     ) -> None:
         """Append a deletion entry to the log."""
-        assert isinstance(key_high, int), "key_high must be int"
-        assert isinstance(key_low, int), "key_low must be int"
-        assert isinstance(value_high, int), "value_high must be int"
-        assert isinstance(value_low, int), "value_low must be int"
+        assert assumption(key_high, int)
+        assert assumption(key_low, int)
+        assert assumption(value_high, int)
+        assert assumption(value_low, int)
 
         with self.lock:
             idx = self.ds.shape[0]
@@ -349,7 +350,7 @@ class WALAnalyzer(threading.Thread):
         self._last_run = 0.0
         self._operation_lock = threading.Lock()
 
-    def record_operation(self, bucket_id: int, op_type: int = 1) -> None:
+    def record_operation(self, bucket_id: int, op_type: OpType) -> None:
         """Record an operation for sophisticated analysis."""
         current_time = time.time()
 
@@ -374,7 +375,7 @@ class WALAnalyzer(threading.Thread):
             stats.last_access = current_time
 
             # Record insert timestamp for rate calculation
-            if op_type == 1:  # Insert operation
+            if op_type == OpType.INSERT:  # Insert operation
                 if stats.insert_timestamps is None:
                     stats.insert_timestamps = []
                 stats.insert_timestamps.append(current_time)

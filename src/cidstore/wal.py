@@ -2,109 +2,32 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import mmap
 import os
 import struct
-import sys
 import threading
 import time
 import zlib
-from enum import Enum
+from asyncio import Event
 from pathlib import Path
-from typing import Any
 
-try:
-    from prometheus_client import Counter, Gauge
+from .constants import OP, OpType, OpVer
+from .logger import get_logger
+from .utils import assumption
+from .metrics import (
+    PROMETHEUS_AVAILABLE,
+    wal_buffer_capacity_bytes,
+    wal_crc_failures,
+    wal_error_count,
+    wal_head_position,
+    wal_records_appended,
+    wal_records_in_buffer,
+    wal_replay_count,
+    wal_tail_position,
+    wal_truncate_count,
+)
 
-    PROMETHEUS_AVAILABLE = True
-    wal_records_appended = Counter(
-        "cidtree_wal_records_appended_total",
-        "Total number of records appended to the WAL",
-        ["operation"],
-    )
-    wal_replay_count = Counter(
-        "cidtree_wal_replay_total", "Total number of WAL replays completed"
-    )
-    wal_crc_failures = Counter(
-        "cidtree_wal_crc_failures_total",
-        "Total CRC checksum failures detected during replay",
-    )
-    wal_truncate_count = Counter(
-        "cidtree_wal_truncate_total", "Total number of WAL truncations completed"
-    )
-    wal_error_count = Counter(
-        "cidtree_wal_error_total",
-        "Total WAL errors encountered",
-        ["type"],
-    )
-    wal_head_position = Gauge(
-        "cidtree_wal_head_position",
-        "Current head pointer position (byte offset) in the WAL buffer",
-    )
-    wal_tail_position = Gauge(
-        "cidtree_wal_tail_position",
-        "Current tail pointer position (byte offset) in the WAL buffer",
-    )
-    wal_buffer_capacity_bytes = Gauge(
-        "cidtree_wal_buffer_capacity_bytes",
-        "Total size of the WAL memory-mapped buffer",
-    )
-    wal_records_in_buffer = Gauge(
-        "cidtree_wal_records_in_buffer",
-        "Number of records currently in the WAL buffer (head - tail) / record_size",
-    )
-except ImportError:
-    PROMETHEUS_AVAILABLE = False
-
-
-logger = logging.getLogger(__name__)
-
-if not logger.hasHandlers():
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-MAX_TXN_RECORDS = 1000
-RECORD_SIZE = 64
-RECORD_CORE_SIZE = 50
-CHECKSUM_SIZE = 4
-PADDING_SIZE = RECORD_SIZE - RECORD_CORE_SIZE - CHECKSUM_SIZE
-
-
-class OpType(Enum):
-    INSERT = 1
-    DELETE = 2
-    TXN_START = 3
-    TXN_COMMIT = 4
-    TXN_ABORT = 5
-
-    @classmethod
-    def from_value(cls, value: int) -> OpType:
-        if not 0 <= value <= 0x3F:
-            raise ValueError(f"OpType value {value} out of 6-bit range (0-63)")
-        try:
-            return cls(value)
-        except ValueError as e:
-            logger.warning(f"Unknown OpType value encountered: {value}")
-            raise ValueError(f"Unknown OpType value: {value}") from e
-
-
-class OpVer(Enum):
-    PAST = 0
-    NOW = 1
-    NEXT = 2
-    FUTURE = 3
-
-    @classmethod
-    def from_value(cls, value: int) -> "OpVer":
-        if not 0 <= value <= 0x03:
-            raise ValueError(f"OpVersion value {value} out of 2-bit range (0-3)")
-        return cls(value)
+logger = get_logger(__name__)
 
 
 class WAL:
@@ -120,9 +43,6 @@ class WAL:
         path: Path | None = None,
         size: int | None = None,
     ) -> None:
-        """
-        Initialize WAL. If path is None, use an in-memory mmap buffer (for tests or ephemeral use).
-        """
         self.path = path
         self.size = size or self.DEFAULT_WAL_SIZE
         self._wal_seq: int = 0
@@ -144,9 +64,9 @@ class WAL:
         self._mmap: mmap.mmap
 
         # Event for async consumers to be notified of new records
-        self._new_record_event = asyncio.Event()
+        self._new_record_event = Event()
 
-        self._open()
+        self.open()
         self._head: int = 0
         self._tail: int = 0
         self._init_header()
@@ -164,22 +84,22 @@ class WAL:
                 // WAL.REC_SIZE
             )
 
-    def _open(self):
+    def open(self):
         if self.path is None:
             self._mmap = mmap.mmap(-1, self.size)
             logger.debug(f"Created in-memory WAL of size {self.size}")
         else:
-            wal_path = str(self.path)
-            exists = os.path.exists(wal_path)
+            wal_path = Path(self.path)
+            exists = wal_path.exists()
             flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0)
             mode = 0o666
             try:
                 if not exists:
-                    self._wal_fd = os.open(wal_path, flags, mode)
+                    self._wal_fd = os.open(str(wal_path), flags, mode)
                     os.ftruncate(self._wal_fd, self.size)
                     logger.debug(f"Created WAL file {wal_path} of size {self.size}")
                 else:
-                    self._wal_fd = os.open(wal_path, flags)
+                    self._wal_fd = os.open(str(wal_path), flags)
                     statinfo = os.fstat(self._wal_fd)
                     if statinfo.st_size != self.size:
                         logger.warning(
@@ -216,9 +136,6 @@ class WAL:
         """
         Async WAL consumer loop.
         Waits for new records using an event, with polling as fallback.
-        Args:
-            store: The CIDStore instance (must have an async store.apply method or use asyncio.to_thread).
-            poll_interval: Time in seconds to wait between polling for new records.
         """
 
         while True:
@@ -234,6 +151,10 @@ class WAL:
         self._new_record_event.clear()
 
     async def consume(self):
+        for op in self.replay():
+            await self.apply(op)
+
+    def apply(self, op: OP):
         raise NotImplementedError("Is assigned via store.")
 
     def _init_header(self):
@@ -321,22 +242,22 @@ class WAL:
             )
         self._new_record_event.set()
 
-    def replay(self) -> list[dict[str, Any]]:
+    def replay(self) -> list[OP]:
         logger.info("[WAL.replay] Called")
-        ops: list[dict[str, Any]] = []
+        ops: list[OP] = []
         with self._lock:
             tail = self._get_tail()
             head = self._get_head()
-            current_pos = tail
+
             logger.debug(f"[WAL.replay] Starting at tail={tail}, head={head}")
-            while current_pos != head:
-                rec_bytes = self._mmap[current_pos : current_pos + WAL.REC_SIZE]
+            while tail != head:
+                rec_bytes = self._mmap[tail : tail + WAL.REC_SIZE]
                 rec = unpack_record(rec_bytes)
                 if rec is not None:
                     ops.append(rec)
-                current_pos += WAL.REC_SIZE
-                if current_pos >= self.size:
-                    current_pos = WAL.HEADER_SIZE
+                tail += WAL.REC_SIZE
+                if tail >= self.size:
+                    tail = WAL.HEADER_SIZE
             self._set_tail(head)
             self._mmap.flush()
             logger.info(
@@ -349,9 +270,7 @@ class WAL:
         return ops
 
     def truncate(self, confirmed_through_pos: int) -> None:
-        assert isinstance(confirmed_through_pos, int), (
-            "confirmed_through_pos must be an integer byte offset"
-        )
+        assumption(confirmed_through_pos, int)
         with self._lock:
             record_area_start = WAL.HEADER_SIZE
             record_area_end = self.size
@@ -404,22 +323,6 @@ class WAL:
                 finally:
                     self._wal_fd = None
 
-    @staticmethod
-    def prometheus_metrics() -> list[Any]:
-        if not PROMETHEUS_AVAILABLE:
-            return []
-        return [
-            wal_records_appended,
-            wal_replay_count,
-            wal_crc_failures,
-            wal_truncate_count,
-            wal_error_count,
-            wal_head_position,
-            wal_tail_position,
-            wal_buffer_capacity_bytes,
-            wal_records_in_buffer,
-        ]
-
     def _next_hybrid_time(self):
         """
         Generate a hybrid time tuple (nanos, seq, shard_id) for WAL records.
@@ -443,6 +346,7 @@ class WAL:
         logger.info(
             f"[WAL.log_insert] Inserted record for {k_high=}, {k_low=}, {v_high=}, {v_low=}"
         )
+        await self.consume_once()
 
     def flush(self) -> None:
         """
@@ -605,7 +509,7 @@ def pack_record(
     return full_packed
 
 
-def unpack_record(rec: bytes) -> dict[str, int] | None:
+def unpack_record(rec: bytes) -> OP | None:
     if len(rec) != WAL.REC_SIZE:
         logger.error(
             f"Attempted to unpack record of incorrect size: {len(rec)} bytes. {rec}"
@@ -643,18 +547,18 @@ def unpack_record(rec: bytes) -> dict[str, int] | None:
         if PROMETHEUS_AVAILABLE:
             wal_error_count.labels(type="unpack_struct_error").inc()
         return None
-    version = (version_op >> 6) & 0x03
-    op_type = version_op & 0x3F
-    return {
-        "version": version,
-        "op_type": op_type,
-        "reserved": reserved,
-        "nanos": nanos,
-        "seq": seq,
-        "shard_id": shard_id,
-        "k_high": k_high,
-        "k_low": k_low,
-        "v_high": v_high,
-        "v_low": v_low,
-        "checksum": stored_checksum,
-    }
+    version = OpVer((version_op >> 6) & 0x03)
+    optype = OpType(version_op & 0x3F)
+    return OP(
+        version=version,
+        optype=optype,
+        reserved=reserved,
+        nanos=nanos,
+        seq=seq,
+        shard_id=shard_id,
+        k_high=k_high,
+        k_low=k_low,
+        v_high=v_high,
+        v_low=v_low,
+        checksum=stored_checksum,
+    )

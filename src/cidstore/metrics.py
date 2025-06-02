@@ -5,6 +5,88 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
+PROMETHEUS_AVAILABLE = False
+
+try:
+    from prometheus_client import Counter, Gauge
+
+    PROMETHEUS_AVAILABLE = True
+    wal_records_appended = Counter(
+        "cidtree_wal_records_appended_total",
+        "Total number of records appended to the WAL",
+        ["operation"],
+    )
+    wal_replay_count = Counter(
+        "cidtree_wal_replay_total", "Total number of WAL replays completed"
+    )
+    wal_crc_failures = Counter(
+        "cidtree_wal_crc_failures_total",
+        "Total CRC checksum failures detected during replay",
+    )
+    wal_truncate_count = Counter(
+        "cidtree_wal_truncate_total", "Total number of WAL truncations completed"
+    )
+    wal_error_count = Counter(
+        "cidtree_wal_error_total",
+        "Total WAL errors encountered",
+        ["type"],
+    )
+    wal_head_position = Gauge(
+        "cidtree_wal_head_position",
+        "Current head pointer position (byte offset) in the WAL buffer",
+    )
+    wal_tail_position = Gauge(
+        "cidtree_wal_tail_position",
+        "Current tail pointer position (byte offset) in the WAL buffer",
+    )
+    wal_buffer_capacity_bytes = Gauge(
+        "cidtree_wal_buffer_capacity_bytes",
+        "Total buffer capacity in bytes",
+    )
+    wal_records_in_buffer = Gauge(
+        "cidtree_wal_records_in_buffer",
+        "Current number of records in the WAL buffer",
+    )
+except ImportError:
+
+    # Create dummy objects for when prometheus_client is not available
+    class DummyMetric:
+        def inc(self, *args, **kwargs):
+            pass
+
+        def set(self, *args, **kwargs):
+            pass
+
+        def labels(self, *args, **kwargs):
+            return self
+
+    wal_records_appended = DummyMetric()
+    wal_replay_count = DummyMetric()
+    wal_crc_failures = DummyMetric()
+    wal_truncate_count = DummyMetric()
+    wal_error_count = DummyMetric()
+    wal_head_position = DummyMetric()
+    wal_tail_position = DummyMetric()
+    wal_buffer_capacity_bytes = DummyMetric()
+    wal_records_in_buffer = DummyMetric()
+
+
+def get_wal_prometheus_metrics() -> list[Any]:
+    """Get all WAL Prometheus metrics."""
+    if PROMETHEUS_AVAILABLE:
+        return [
+            wal_records_appended,
+            wal_replay_count,
+            wal_crc_failures,
+            wal_truncate_count,
+            wal_error_count,
+            wal_head_position,
+            wal_tail_position,
+            wal_buffer_capacity_bytes,
+            wal_records_in_buffer,
+        ]
+    return []
+
 
 class MetricsCollector:
     """

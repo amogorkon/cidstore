@@ -8,12 +8,14 @@ from functools import reduce
 from operator import add
 from typing import Any, Dict, List, Optional
 
+from cidstore.constants import OpType
+
 
 @dataclass
 class Operation:
     """Represents a single WAL operation."""
 
-    op_type: int
+    op_type: OpType
     bucket_id: int
     timestamp: float
 
