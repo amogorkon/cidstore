@@ -25,6 +25,7 @@ def jwt_required(request: Request):
 
 # Internal IP check (simple, not production-grade)
 def is_internal_ip(request: Request) -> bool:
+    assert request.client, "Request client host is not set"
     client_ip = request.client.host
     return (
         client_ip.startswith("127.")
