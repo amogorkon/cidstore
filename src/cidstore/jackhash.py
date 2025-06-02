@@ -3,6 +3,8 @@ The JACK hash alphabet.
 For details see https://pypi.org/project/jackhash
 """
 
+from .utils import assumption
+
 # korean characters: https://github.com/arcsecw/wubi/blob/master/wubi/cw.py
 # chinese characters: https://github.com/tsroten/zhon/blob/develop/zhon/cedict/all.py
 
@@ -40666,7 +40668,7 @@ def hexdigest_as_JACK(string):
     Returns:
         str: The JACK-encoded string.
     """
-    assert isinstance(string, str)
+    assert assumption(string, str)
     return "".join(
         AlphabetAccess.alphabet[c]
         for c in represent_num_as_base(int(string, 16), len(AlphabetAccess.alphabet))
@@ -40683,7 +40685,7 @@ def JACK_as_num(string: str):
     Returns:
         int: The decoded integer value.
     """
-    assert isinstance(string, str)
+    assert assumption(string, str)
     string = "".join(string.split())
     return sum(
         len(AlphabetAccess.reverse_alphabet) ** i * AlphabetAccess.reverse_alphabet[x]
@@ -40701,7 +40703,7 @@ def num_as_hexdigest(num):
     Returns:
         str: The zero-padded hexadecimal string.
     """
-    assert isinstance(num, int)
+    assert assumption(num, int)
     return str.rjust(hex(num)[2:], 64, "0")
 
 
@@ -40715,5 +40717,5 @@ def is_JACK(H):
     Returns:
         bool: True if the string is JACK-encoded, False otherwise.
     """
-    assert isinstance(H, str)
+    assert assumption(H, str)
     return all(c in AlphabetAccess.alphabet for c in H)
