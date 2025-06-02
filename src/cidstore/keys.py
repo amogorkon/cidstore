@@ -7,7 +7,10 @@ from uuid import NAMESPACE_DNS, uuid4, uuid5
 import numpy as np
 from numpy.typing import NDArray
 
+from cidstore.constants import HASH_ENTRY_DTYPE
+
 from .jackhash import JACK_as_num, hexdigest_as_JACK, num_as_hexdigest
+from .utils import assumption
 
 _kv_store: dict[int, str] = {}
 
@@ -34,11 +37,17 @@ class E(int):
 
     __slots__ = ()
 
-    def __new__(cls, id_: int | str | None = None) -> E:
+    def __new__(cls, id_: int | str | list[int] | tuple[int, int] | None = None) -> E:
         # Delegate to from_jackhash if a string is passed that looks like a JACK hash
         if isinstance(id_, str):
             return cls.from_jackhash(id_)
-        assert id_ is not None and 0 <= id_ < (1 << 128), "ID must be a 128-bit integer"
+        if isinstance(id_, (list, tuple, np.void)):
+            assert len(id_) == 2, "input must be a list of two integers"
+            # Check all elements are int or np.uint64
+            for i in id_:
+                assert assumption(i, int, np.uint64)
+            a, b = id_
+            return cls.from_int((int(a) << 64) | int(b))
         if id_ is None:
             id_ = uuid4().int
         return super().__new__(cls, id_)
@@ -67,29 +76,21 @@ class E(int):
         return np.array((self.high, self.low), dtype=KEY_DTYPE)
 
     @classmethod
-    def from_hdf5(cls, arr: NDArray[np.void]) -> E:
-        assert hasattr(arr, "dtype"), "arr must be a numpy array with dtype"
+    def from_entry(cls, entry: NDArray[np.void]) -> E:
         """
         Create an E from an HDF5 row. Accepts either ('high', 'low') or ('key_high', 'key_low') or ('value_high', 'value_low') fields.
         """
-        # Try all possible field name pairs
-        fields = arr.dtype.fields
-        if fields is not None:
-            for hi, lo in [
-                ("high", "low"),
-                ("key_high", "key_low"),
-                ("value_high", "value_low"),
-            ]:
-                if hi in fields and lo in fields:
-                    return cls((int(arr[hi].item()) << 64) | int(arr[lo].item()))
-        raise ValueError("HDF5 row does not contain recognized high/low fields")
+        assert entry.dtype == HASH_ENTRY_DTYPE
+
+        return cls((int(entry["high"].item()) << 64) | int(entry["low"].item()))
 
     @classmethod
     def from_int(cls, id_: int) -> E:
         """
         Create an E from an integer. Copilot is confused without it.
         """
-        assert isinstance(id_, int), "id_ must be int"
+        assert assumption(id_, int)
+        assert id_ is not None and 0 <= id_ < (1 << 128), "ID must be a 128-bit integer"
         return cls(id_)
 
     @classmethod
@@ -101,7 +102,7 @@ class E(int):
 
     @classmethod
     def from_str(cls, value: str) -> E:
-        assert isinstance(value, str), "value must be str"
+        assert assumption(value, str)
         id_ = uuid5(NAMESPACE_DNS, value).int
         _kv_store.setdefault(id_, value)
         return cls(id_)

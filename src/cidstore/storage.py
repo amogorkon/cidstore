@@ -1,30 +1,25 @@
 """storage.py - HDF5 storage manager and raw hooks for CIDTree"""
 
 import io
-import logging
-import sys
 from pathlib import Path
 from time import time
-from typing import Any
 
-import h5py
+import numpy as np
+from h5py import Dataset, File, Group, version
 
 from .config import CONFIG_GROUP, NODES_GROUP, VALUES_GROUP
+from .constants import (
+    BUCKS,
+    HASH_ENTRY_DTYPE,
+    HDF5_NOT_OPEN_MSG,
+    OP,
+    ROOT,
+)
 from .keys import E
+from .logger import get_logger
+from .utils import assumption
 
-HDF5_NOT_OPEN_MSG = "HDF5 file is not open."
-
-logger = logging.getLogger(__name__)
-if not logger.hasHandlers():
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-
-ROOT = "/root"
+logger = get_logger(__name__)
 
 
 class Storage:
@@ -33,35 +28,34 @@ class Storage:
         Initialize the StorageManager with the given file path or in-memory buffer.
         Accepts a string path, pathlib.Path, or an io.BytesIO object for in-memory operation.
         """
+        self.path: Path | io.BytesIO
         match path:
             case None:
                 self.path = io.BytesIO()
-                storage_type = "in-memory"
             case str():
                 self.path = Path(path)
-                storage_type = "file"
             case Path():
                 self.path = path
-                storage_type = "file"
             case io.BytesIO():
                 self.path = path
-                storage_type = "in-memory"
             case _:
                 raise TypeError("path must be str, Path, or io.BytesIO or None")
-        self.file: h5py.File = self.open()
+
+        self.file: File = self.open()
         self._init_hdf5_layout()
         self._init_root()
 
-        mode = self.file.mode if hasattr(self.file, "mode") else "unknown"
-        swmr = self.file.swmr_mode if hasattr(self.file, "swmr_mode") else False
-        try:
-            groups = list(self.file.keys())
-        except Exception:
-            groups = []
-        path_str = str(self.path) if not isinstance(self.path, io.BytesIO) else None
-        logger.info(
-            f"Storage initialized: {storage_type=}, {path_str=}, {mode=}, {swmr=}, {groups=}"
-        )
+        mode = getattr(self.file, "mode", "unknown")
+        swmr = getattr(self.file, "swmr_mode", False)
+        assert set(self.file.keys()) == {
+            "buckets",
+            "config",
+            "nodes",
+            "values",
+            "root",
+        }, "HDF5 file layout is invalid"
+        path_str = None if isinstance(self.path, io.BytesIO) else str(self.path)
+        logger.info(f"Storage initialized:, {path_str=}, {mode=}, {swmr=}")
 
     def _init_root(self) -> None:
         """
@@ -86,8 +80,7 @@ class Storage:
         """
         assert self.file is not None, HDF5_NOT_OPEN_MSG
 
-        f = self.file
-        cfg = f.require_group("/config")
+        cfg = self.file.require_group("/config")
         cfg.attrs.setdefault("format_version", 1)
         cfg.attrs.setdefault("created_by", "CIDStore")
         cfg.attrs.setdefault("swmr", True)
@@ -95,19 +88,16 @@ class Storage:
         cfg.attrs.setdefault("last_modified", int(time()))
         if "dir" not in cfg.attrs:
             cfg.attrs["dir"] = "{}"
-        f.attrs.setdefault("cidstore_version", "1.0")
-        f.attrs.setdefault("hdf5_version", h5py.version.hdf5_version)
-        f.attrs.setdefault("swmr", True)
-        if "/values" not in f:
-            f.create_group("/values")
-        if "/values/sp" not in f:
-            f["/values"].create_group("sp")
-        if "/nodes" not in f:
-            f.create_group("/nodes")
-        f.flush()
-        # self.deletion_log = DeletionLog(f)
-        # self.gc_thread = BackgroundGC(self)
-        # self.gc_thread.start()
+        self.file.attrs.setdefault("cidstore_version", "1.0")
+        self.file.attrs.setdefault("hdf5_version", version.hdf5_version)
+        self.file.attrs.setdefault("swmr", True)
+        if "/values" not in self.file:
+            self.file.create_group("/values")
+        if "/values/sp" not in self.file:
+            self.file["/values"].file.create_group("sp")
+        if "/nodes" not in self.file:
+            self.file.create_group("/nodes")
+        self.file.flush()
 
     def _ensure_core_groups(self) -> None:
         """
@@ -115,11 +105,8 @@ class Storage:
         Note: WAL_DATASET is managed by the WAL class itself.
         """
         assert self.file is not None, HDF5_NOT_OPEN_MSG
-        if self.file is None:
-            raise RuntimeError(HDF5_NOT_OPEN_MSG)
-        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP, "/buckets"):
+        for grp in (CONFIG_GROUP, NODES_GROUP, VALUES_GROUP, BUCKS):
             g = self.file.require_group(grp)
-            # Add required attributes to /config for test compatibility
             if grp == CONFIG_GROUP:
                 if "format_version" not in g.attrs:
                     g.attrs["format_version"] = 1
@@ -130,8 +117,7 @@ class Storage:
         """
         Allow subscript access to delegate to the underlying HDF5 file.
         """
-        if self.file is None:
-            self.open("a")
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
         return self.file[item]
 
     def __contains__(self, item):
@@ -139,46 +125,24 @@ class Storage:
         Allow 'in' checks to delegate to the underlying HDF5 file.
         Always open in append mode to allow creation if needed.
         """
-        if self.file is None:
-            with self.open("a") as f:
-                return item in f
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
         return item in self.file
 
     def create_group(self, name):
         """
         Allow create_group to delegate to the underlying HDF5 file.
         """
-        if self.file is None:
-            self.open()
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
         return self.file.create_group(name)
 
-    def open(self, mode: str = "a", swmr: bool = False) -> h5py.File:
+    def open(self) -> File:
         """
         Open the HDF5 file (create if needed), enable SWMR if desired,
         and ensure the core groups (config, nodes, values) exist.
         Supports both file paths and in-memory io.BytesIO buffers.
         """
-        assert isinstance(mode, str), "mode must be str"
-        assert isinstance(swmr, bool), "swmr must be bool"
         try:
-            path = self.path
-            if isinstance(path, io.BytesIO):
-                # In-memory HDF5 file - use mode 'w' for fresh BytesIO to avoid corruption
-                if mode == "a" and path.tell() == 0 and len(path.getvalue()) == 0:
-                    # Fresh empty buffer, use 'w' to create new file
-                    self.file = h5py.File(path, "w")
-                else:
-                    self.file = h5py.File(path, mode)
-            else:
-                # Use Path for filesystem paths
-                if isinstance(path, Path):
-                    path = str(path)
-                if swmr and mode == "r":
-                    # Reader in SWMR mode
-                    self.file = h5py.File(path, mode, libver="latest", swmr=True)
-                else:
-                    # Default: support reads/writes
-                    self.file = h5py.File(path, mode, libver="latest")
+            self.file = File(self.path, "w", libver="latest")
             self._ensure_core_groups()
             return self.file
         except (OSError, RuntimeError) as e:
@@ -190,42 +154,19 @@ class Storage:
         operations or before handing off to readers in SWMR mode.
         """
         assert self.file is not None, HDF5_NOT_OPEN_MSG
-        if self.file:
-            self.file.flush()
+        self.file.flush()
 
     def close(self) -> None:
         """
         Close the HDF5 file, flushing first. Safe to call multiple times.
         """
-        # file can be None, but if not, must be h5py.File
-        assert self.file is None or hasattr(self.file, "flush"), (
-            "file must be h5py.File or None"
-        )
-        if self.file is not None:
-            try:
-                self.flush()
-                self.file.close()
-            except (OSError, RuntimeError) as e:
-                raise RuntimeError(f"Failed to close HDF5 file: {e}") from e
-            finally:
-                self.file = None
-
-    # Context‐manager support    def __enter__(self) -> h5py.File:
-        """
-        Enter the runtime context related to this object.
-        Returns the opened HDF5 file.
-        """
-        # If file is already open, return it; otherwise open it
-        if self.file is not None:
-            return self.file
-        return self.open()
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        """
-        Exit the runtime context and close the HDF5 file.
-        """
-        # No assert needed
-        self.close()
+        # file can be None, but if not, must be File
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
+        try:
+            self.flush()
+            self.file.close()
+        except (OSError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to close HDF5 file: {e}") from e
 
     @property
     def buckets(self):
@@ -233,113 +174,152 @@ class Storage:
         Return the buckets group from the HDF5 file as a dict-like object.
         Ensures the file is open if it was closed.
         """
-        if self.file is None:
-            self.open("a")
-        return self.file["/buckets"]
+        assert self.file is not None, HDF5_NOT_OPEN_MSG
+        return self.file[BUCKS]
 
-    def _apply_insert(self, key: E, value: E, skip_wal: bool = False) -> None:
-        """
-        Insert a key-value pair into the tree.
-        Args:
-            key: Key to insert (E).
-            value: Value to insert (E).
-        Handles multi-value logic (inline/spill, ECC) and WAL logging.
-        Appends to the unsorted region of the bucket; background maintenance merges/sorts.
-        """
+    async def apply_insert(self, op: OP, bucket_name: str) -> Dataset:
+        """Apply an insert operation from the WAL to the storage."""
+        bucket_group = self.file[BUCKS]
+        assumption(bucket_group, Group)
+        bucket_ds = bucket_group[bucket_name]
+        assumption(bucket_ds, Dataset)
 
-        with self._writer_lock:
-            if not skip_wal:
-                # Only log to WAL if not already done in async insert
-                self.wal.log_insert(key.high, key.low, value.high, value.low)
+        total = bucket_ds.shape[0]
+        entry_idx = None
 
-        if key not in self.dir:
-            if not self.buckets:
-                bucket_id: int = self._bucket_counter
-                bucket_name = f"bucket_{bucket_id}"
-                buckets_group = self.hdf.file["/buckets"]
-                if bucket_name in buckets_group:
-                    bucket_ds = buckets_group[bucket_name]
-                else:
-                    bucket_ds: Any = buckets_group.create_dataset(
-                        bucket_name,
-                        shape=(0,),
-                        maxshape=(None,),
-                        dtype=HASH_ENTRY_DTYPE,
-                        chunks=True,
-                        track_times=False,
-                    )
-                    bucket_ds.attrs["sorted_count"] = 0
-                if bucket_name not in self.buckets:
-                    self.buckets[bucket_name] = bucket_ds
-                self._bucket_counter += 1
-                self.dir[key] = bucket_id
-            else:
-                bucket_id: int = self._get_bucket_id(key)
-                bucket_name = f"bucket_{bucket_id}"
-                buckets_group = self.hdf.file["/buckets"]
-                if bucket_name in buckets_group:
-                    bucket_ds = buckets_group[bucket_name]
-                else:
-                    bucket_ds: Any = buckets_group.create_dataset(
-                        bucket_name,
-                        shape=(0,),
-                        maxshape=(None,),
-                        dtype=HASH_ENTRY_DTYPE,
-                        chunks=True,
-                        track_times=False,
-                    )
-                    bucket_ds.attrs["sorted_count"] = 0
-                if bucket_name not in self.buckets:
-                    self.buckets[bucket_name] = bucket_ds
-                self.dir[key] = bucket_id
-            self._save_directory()
-
-        bucket_id = self.dir[key]
-        bucket_name = f"bucket_{bucket_id}"
-        bucket: Any = self.buckets[bucket_name]
-        entry_idx: int | None = None
-        for i in range(bucket.shape[0]):
-            if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low:
+        for i in range(total):
+            entry = bucket_ds[i]
+            if entry["key_high"] == op.k_high and entry["key_low"] == op.k_low:
                 entry_idx = i
                 break
-        if entry_idx is not None:
-            self._add_value_to_bucket_entry(bucket, entry_idx, key, value)
-            return
-        # No existing entry found, create a new one
-        new_entry: Any = np.zeros(1, dtype=bucket.dtype)
-        new_entry[0]["key_high"] = key.high
-        new_entry[0]["key_low"] = key.low
-        new_entry[0]["slots"][0] = int(value)
-        new_entry[0]["state_mask"] = encode_state_mask(1)
-        new_entry[0]["version"] = 1
-        bucket.resize((bucket.shape[0] + 1,))
-        bucket[-1] = new_entry[0]
-        bucket.file.flush()
 
-    def _apply_delete(self, key: E) -> None:
-        assert isinstance(key, E)
-        bucket_id = self.dir.get(key)
-        if bucket_id is None:
-            return
-        bucket_name = f"bucket_{bucket_id}"
-        bucket = self.buckets.get(bucket_name)
-        if bucket is None:
-            return
-        found_idx = next(
-            (
-                i
-                for i in range(bucket.shape[0])
-                if bucket[i]["key_high"] == key.high and bucket[i]["key_low"] == key.low
-            ),
-            None,
+        if entry_idx is not None:
+            entry = bucket_ds[entry_idx]
+        else:
+            entry = new_entry(op.k_high, op.k_low)
+
+        assert entry.dtype == HASH_ENTRY_DTYPE, "Entry not HASH_ENTRY_DTYPE"
+
+        slot0, slot1 = entry["slots"]
+
+        match any(slot0), any(slot1):
+            case False, False:  # Inline mode, both slots empty, new entry
+                entry["slots"][0]["high"] = op.v_high
+                entry["slots"][0]["low"] = op.v_low
+                bucket_ds.resize((total + 1,))
+                bucket_ds[total] = entry
+                bucket_ds.attrs["entry_count"] = total + 1
+
+            case True, False:  # Inline mode, first slot used, put in second slot
+                entry["slots"][1]["high"] = op.v_high
+                entry["slots"][1]["low"] = op.v_low
+                bucket_ds[entry_idx] = entry
+
+            case True, True:  # Inline mode, both slots used, must promote to spill
+                bucket_id = int(
+                    bucket_name.split("_")[1]
+                )  # Parse bucket_id from bucket_name
+                assert entry_idx is not None, "Entry index must be set"
+                await self.apply_insert_promote(
+                    bucket_ds,
+                    entry_idx,
+                    entry,
+                    bucket_id,
+                    op.k_high,
+                    op.k_low,
+                    op.v_high,
+                    op.v_low,
+                )
+
+            case False, True:
+                await self.apply_insert_spill(entry, op.v_high, op.v_low)
+
+        return bucket_ds
+
+    async def apply_insert_promote(
+        self,
+        bucket_ds: Dataset,
+        entry_idx: int,
+        entry,
+        bucket_id: int,
+        key_high: int,
+        key_low: int,
+        value_high: int,
+        value_low: int,
+    ) -> None:
+        """Promote inline entry to ValueSet (spill) mode when both slots are full."""
+        slot0, slot1 = entry["slots"]
+
+        value1 = (slot0["high"] << 64) | slot0["low"]
+        value2 = (slot1["high"] << 64) | slot1["low"]
+        new_value = (value_high << 64) | value_low
+
+        values = [value1, value2, new_value]
+
+        sp_group = self._get_valueset_group(self.file)
+        ds_name = _get_spill_ds_name(bucket_id, key_high, key_low)
+
+        if ds_name in sp_group:
+            del sp_group[ds_name]
+
+        ds = sp_group.create_dataset(
+            ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
         )
-        if found_idx is None:
-            return
-        bucket[found_idx]["slots"][:] = 0
-        bucket[found_idx]["state_mask"] = 0
-        spill_ds_name = f"sp_{bucket_id}_{key.high}_{key.low}"
-        values_group = self.hdf.file["/values/sp"]
-        if spill_ds_name in values_group:
-            del values_group[spill_ds_name]
-        bucket[found_idx]["version"] += 1
-        bucket.file.flush()
+        ds[:] = [int(v) for v in values]
+
+        spill_ptr = ds.id.ref
+        entry["slots"][0]["high"] = 0
+        entry["slots"][0]["low"] = 0
+        entry["slots"][1]["high"] = int(spill_ptr) >> 64
+        entry["slots"][1]["low"] = int(spill_ptr) & 0xFFFFFFFFFFFFFFFF
+
+        bucket_ds[entry_idx] = entry
+
+    def _get_valueset_group(self):
+        """Get or create the valueset group for spill datasets."""
+        if "/values" not in self.file:
+            self.file.create_group("/values")
+        values_group = self.file["/values"]
+        assumption(values_group, Group)
+        if "sp" not in values_group:
+            values_group.create_group("sp")
+        return values_group["sp"]
+
+    def get_values(self, entry) -> list[E]:
+        slot0, slot1 = entry["slots"]
+
+        match any(slot0), any(slot1):
+            case (True, False):
+                # Inline Mode, 1 Entry:
+                return [E.from_entry(entry)]
+            case (True, True):
+                # Inline Mode, 2 Entries:
+                return [E.from_entry(s) for s in entry["slots"]]
+
+            case (False, True):
+                # Spill Mode, Spillpointer in slot1
+                ref_int = (slot1["high"] << 64) | slot1["low"]
+                ref_bytes = ref_int.to_bytes(16, "big")
+                try:
+                    valueset_ds = self.file.dereference(ref_bytes)
+                    return [E(v) for v in valueset_ds[:] if v != 0]
+                except Exception:
+                    pass  # Could not dereference, or dataset missing
+
+        return []
+
+
+# STANDALONE FUNCTIONS
+
+
+def new_entry(k_high, k_low):
+    """Make a new entry to the bucket dataset and return the Dataset."""
+    entry = np.zeros((), dtype=HASH_ENTRY_DTYPE)
+    entry["key_high"] = k_high
+    entry["key_low"] = k_low
+    return entry
+
+
+def _get_spill_ds_name(bucket_id: int, key_high: int, key_low: int) -> str:
+    """Generate the spill dataset name for a key."""
+    return f"sp_{bucket_id}_{key_high}_{key_low}"
