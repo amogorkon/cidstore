@@ -292,4 +292,5 @@ async def test_inline_slots_empty_handling(temp_dir):
             except RuntimeError:
                 pass
 
+
 # Removed manual test runner block; use pytest to run these tests with fixtures.

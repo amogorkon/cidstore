@@ -1,9 +1,12 @@
-import pytest
 from pathlib import Path
+
+import pytest
+
 from cidstore.keys import E
 from cidstore.storage import Storage
 from cidstore.store import CIDStore
 from cidstore.wal import WAL
+
 
 @pytest.mark.asyncio
 async def test_wal_recovery(tmp_path):

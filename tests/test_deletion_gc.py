@@ -82,6 +82,7 @@ async def test_concurrent_deletion_and_gc(directory):
 @pytest.mark.xfail(reason="compact not implemented")
 async def test_idempotent_gc(directory):
     from cidstore.keys import E
+
     key = E.from_str("idempotent")
     await directory.insert(key, E(1))
     await directory.delete(key, E(1))
@@ -93,6 +94,7 @@ async def test_idempotent_gc(directory):
 @pytest.mark.xfail(reason="recover not implemented")
 async def test_wal_and_deletion_log_replay(directory):
     from cidstore.keys import E
+
     key = E.from_str("replay")
     await directory.insert(key, E(123))
     await directory.delete(key, E(123))
@@ -103,6 +105,7 @@ async def test_wal_and_deletion_log_replay(directory):
 @pytest.mark.xfail(reason="rebalance_buckets not implemented")
 async def test_underfilled_bucket_merge(directory):
     from cidstore.keys import E
+
     for i in range(20):
         await directory.insert(E.from_str(f"bucket{i}"), E(i))
     for i in range(20):

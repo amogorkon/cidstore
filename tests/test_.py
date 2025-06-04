@@ -1,8 +1,5 @@
 """Core tests to quickly check the basic functionality of the library on every edit."""
 
-import asyncio
-from pathlib import Path
-
 import pytest
 
 from cidstore.keys import E

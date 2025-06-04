@@ -14,10 +14,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from cidstore.keys import E
+from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
 from cidstore.storage import Storage
 from cidstore.store import CIDStore
 from cidstore.wal import WAL
-from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
 
 
 def make_key(high: int, low: int) -> E:
@@ -64,7 +64,9 @@ async def test_background_sort_unsorted_regions():
     store.maintenance_manager.maintenance_thread.stop()  # Stop automatic background
 
     # Create a manual background maintenance with low threshold
-    config = MaintenanceConfig(maintenance_interval=1, sort_threshold=3, merge_threshold=2)
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=3, merge_threshold=2
+    )
     test_maintenance = BackgroundMaintenance(store, config)
 
     # Insert several values to create unsorted region

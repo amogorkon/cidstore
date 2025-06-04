@@ -12,6 +12,7 @@ pytestmark = pytest.mark.asyncio
 async def test_bucket_split(bucket):
     """Inserting enough entries should trigger a split; check split invariants."""
     from cidstore.keys import E
+
     for i in range(bucket.SPLIT_THRESHOLD + 1):
         await bucket.insert(E.from_str(f"k{i}"), E(i))
     new_bucket, sep = await bucket.split()
@@ -25,6 +26,7 @@ async def test_bucket_split(bucket):
 async def test_sorted_unsorted_region_logic(bucket):
     """Test sorted/unsorted region logic per spec 3 (placeholder if not implemented)."""
     from cidstore.keys import E
+
     for i in range(10):
         await bucket.insert(E.from_str(f"srt{i}"), E(i))
     sorted_count = await bucket.get_sorted_count()
@@ -37,6 +39,7 @@ async def test_sorted_unsorted_region_logic(bucket):
 async def test_bucket_structure_and_types(bucket):
     """Check that the bucket structure matches canonical data types (Spec 2)."""
     from cidstore.keys import E
+
     await bucket.insert(E.from_str("bigkey"), E(1 << 64))
     entry = await bucket.get_entry(E.from_str("bigkey"))
     assert "key_high" in entry
@@ -50,6 +53,7 @@ async def test_bucket_structure_and_types(bucket):
 async def test_directory_entry_structure(directory):
     """Check that directory entries match canonical structure (Spec 2)."""
     from cidstore.keys import E
+
     await directory.insert(E.from_str("dirkey"), E(123))
     entry = await directory.get_entry(E.from_str("dirkey"))
     assert "key_high" in entry

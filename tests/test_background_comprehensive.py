@@ -14,10 +14,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from cidstore.keys import E
+from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
 from cidstore.storage import Storage
 from cidstore.store import CIDStore
 from cidstore.wal import WAL
-from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
+
 
 def make_key(high: int, low: int) -> E:
     """Helper function to create E from high/low values."""
@@ -50,7 +51,9 @@ async def test_background_maintenance_full_cycle():
     time.sleep(0.1)
 
     # Create manual background maintenance with aggressive thresholds
-    config = MaintenanceConfig(maintenance_interval=1, sort_threshold=2, merge_threshold=1)
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=2, merge_threshold=1
+    )
     test_maintenance = BackgroundMaintenance(store, config)
 
     # Insert data to create unsorted regions
@@ -116,8 +119,12 @@ async def test_background_maintenance_with_wal_integration():
     store.maintenance_manager.maintenance_thread.stop()
 
     # Verify WAL analyzer exists
-    assert hasattr(store, "maintenance_manager"), "Store should have maintenance_manager"
-    assert hasattr(store.maintenance_manager, "wal_analyzer_thread"), "Store should have wal_analyzer_thread"
+    assert hasattr(store, "maintenance_manager"), (
+        "Store should have maintenance_manager"
+    )
+    assert hasattr(store.maintenance_manager, "wal_analyzer_thread"), (
+        "Store should have wal_analyzer_thread"
+    )
 
     config = MaintenanceConfig(
         maintenance_interval=1, sort_threshold=5, merge_threshold=3

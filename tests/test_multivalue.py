@@ -65,6 +65,7 @@ async def test_spill_to_inline_demotion(directory):
 async def test_compaction_removes_tombstones(directory):
     """Compaction should remove tombstones and reclaim space in ValueSet."""
     from cidstore.keys import E
+
     key = E.from_str("compact")
     for i in range(10):
         await directory.insert(key, E(i))
@@ -79,6 +80,7 @@ async def test_compaction_removes_tombstones(directory):
 async def test_multivalue_edge_cases(directory):
     """Test edge cases: duplicate insert, delete non-existent, etc."""
     from cidstore.keys import E
+
     key = E.from_str("edge")
     await directory.insert(key, E(1))
     await directory.insert(key, E(1))  # Duplicate
@@ -92,6 +94,7 @@ async def test_multivalue_edge_cases(directory):
 async def test_multivalue_get_entry_fields(directory):
     """get_entry should return all canonical fields for a multi-value key (no state_mask)."""
     from cidstore.keys import E
+
     key = E.from_str("entryfields")
     for i in range(1, 4):
         await directory.insert(key, E(i))
@@ -116,6 +119,7 @@ async def test_multivalue_get_entry_fields(directory):
 async def test_multivalue_sorted_unsorted_api(directory):
     """Test get_sorted_count, get_unsorted_count, get_bucket_sorted_region, get_bucket_unsorted_region."""
     from cidstore.keys import E
+
     key = E.from_str("sortunsort")
     for i in range(1, 11):
         await directory.insert(key, E(i))
@@ -136,6 +140,7 @@ async def test_multivalue_sorted_unsorted_api(directory):
 async def test_multivalue_delete_and_compact(directory):
     """Deleting all values and compacting should remove the key from the ValueSet."""
     from cidstore.keys import E
+
     key = E.from_str("delcompact")
     for i in range(1, 6):
         await directory.insert(key, E(i))
@@ -150,6 +155,7 @@ async def test_multivalue_delete_and_compact(directory):
 async def test_multivalue_is_spilled_and_demote(directory):
     """Test is_spilled and demote_if_possible APIs."""
     from cidstore.keys import E
+
     key = E.from_str("spilldemote")
     for i in range(1, 201):
         await directory.insert(key, E(i))

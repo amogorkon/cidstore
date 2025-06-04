@@ -6,9 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from cidstore.maintenance import WALAnalyzer, MaintenanceConfig
-from cidstore.constants import OpType
 import cidstore.wal_analyzer as wal_analyzer
+from cidstore.constants import OpType
+from cidstore.maintenance import MaintenanceConfig, WALAnalyzer
 
 
 def test_wal_analyzer_basic():
@@ -27,7 +27,9 @@ def test_wal_analyzer_basic():
     # No get_adaptive_split_threshold in WALAnalyzer; skip or mock if needed
 
     # Test high danger buckets
-    high_danger = analyzer.get_high_danger_buckets(threshold=0.01)  # Low threshold to see results
+    high_danger = analyzer.get_high_danger_buckets(
+        threshold=0.01
+    )  # Low threshold to see results
     print(f"High danger buckets: {high_danger}")
 
     # Test maintenance recommendations
@@ -35,7 +37,9 @@ def test_wal_analyzer_basic():
     print(f"Maintenance recommendations: {recommendations}")
 
     # Test statistics (use wal_analyzer.get_stats_summary directly)
-    stats = wal_analyzer.get_stats_summary(analyzer.bucket_stats, analyzer.operation_history)
+    stats = wal_analyzer.get_stats_summary(
+        analyzer.bucket_stats, analyzer.operation_history
+    )
     print(f"Statistics summary: {stats}")
 
     print("✅ WAL analyzer basic tests passed!")

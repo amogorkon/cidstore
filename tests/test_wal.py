@@ -1,9 +1,10 @@
-import time
 import io
+import time
+
 from cidstore.keys import E
 from cidstore.storage import Storage
 from cidstore.store import CIDStore
-from cidstore.wal import WAL, OpType, pack_record, unpack_record, OpVer
+from cidstore.wal import WAL, OpType, OpVer, pack_record, unpack_record
 
 
 def make_tree():
@@ -13,6 +14,7 @@ def make_tree():
 
 
 import pytest
+
 
 @pytest.mark.asyncio
 async def test_wal_log_entry_on_insert():
@@ -116,11 +118,7 @@ async def test_wal_log_contains_all_ops():
 
 
 def test_wal_log_clear_on_checkpoint():
-
     pass
-
-
-
 
 
 def test_pack_record_and_unpack_record_roundtrip():
@@ -133,7 +131,9 @@ def test_pack_record_and_unpack_record_roundtrip():
     value_high = 0x1111222233334444
     value_low = 0x5555666677778888
 
-    rec_bytes = pack_record(version, op_type, time_tuple, key_high, key_low, value_high, value_low)
+    rec_bytes = pack_record(
+        version, op_type, time_tuple, key_high, key_low, value_high, value_low
+    )
     assert isinstance(rec_bytes, bytes)
     assert len(rec_bytes) == 64
 
@@ -150,6 +150,7 @@ def test_pack_record_and_unpack_record_roundtrip():
     assert rec_dict["value_low"] == value_low
     assert isinstance(rec_dict["checksum"], int)
 
+
 def test_unpack_record_invalid_length():
     # Too short
     bad_bytes = b"short"
@@ -157,6 +158,7 @@ def test_unpack_record_invalid_length():
     # Too long
     bad_bytes = b"x" * 100
     assert unpack_record(bad_bytes) is None
+
 
 def test_unpack_record_bad_checksum():
     version = OpVer.NOW
@@ -166,14 +168,20 @@ def test_unpack_record_bad_checksum():
     key_low = 2
     value_high = 3
     value_low = 4
-    rec_bytes = bytearray(pack_record(version, op_type, time_tuple, key_high, key_low, value_high, value_low))
+    rec_bytes = bytearray(
+        pack_record(
+            version, op_type, time_tuple, key_high, key_low, value_high, value_low
+        )
+    )
     # Corrupt the checksum
     rec_bytes[-4:] = b"\x00\x00\x00\x00"
     assert unpack_record(bytes(rec_bytes)) is None
 
+
 @pytest.mark.asyncio
 async def test_wal_file_recovery(tmp_path):
     from pathlib import Path
+
     file = Path(tmp_path) / "walrec.h5"
     walfile = Path(tmp_path) / "walrec.wal"
     storage1 = Storage(path=file)

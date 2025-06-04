@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Test script to verify store integration with WAL analyzer."""
 
-
-
-from cidstore.maintenance import WALAnalyzer, MaintenanceConfig
 from cidstore.constants import OpType
+from cidstore.maintenance import MaintenanceConfig, WALAnalyzer
 
 print("✅ Successfully imported CIDStore and WALAnalyzer")
 
