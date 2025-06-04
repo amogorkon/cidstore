@@ -1199,7 +1199,7 @@ class CIDStore:
         if not isinstance(slots, (list, tuple)):
             return 0
 
-        return sum(bool(slot == 0) for slot in slots)
+        return sum(slot == 0 for slot in slots)
 
     async def valueset_exists(self, key: E) -> bool:
         """Check if a valueset exists for the given key."""
@@ -1208,3 +1208,14 @@ class CIDStore:
         sp_group = self._get_valueset_group(self.hdf)
         ds_name = self._get_spill_ds_name(bucket_id, key)
         return ds_name in sp_group
+
+    def close(self) -> None:
+        """Close underlying HDF5 and WAL resources."""
+        if hasattr(self, "hdf") and hasattr(self.hdf, "close"):
+            self.hdf.close()
+        if hasattr(self, "wal") and hasattr(self.wal, "close"):
+            self.wal.close()
+
+    async def aclose(self) -> None:
+        """Async close for compatibility with async contexts."""
+        self.close()

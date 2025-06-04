@@ -220,6 +220,8 @@ class Storage:
                     bucket_name.split("_")[1]
                 )  # Parse bucket_id from bucket_name
                 assert entry_idx is not None, "Entry index must be set"
+                # Re-fetch the entry from the dataset to ensure it is up-to-date
+                entry = bucket_ds[entry_idx]
                 await self.apply_insert_promote(
                     bucket_ds,
                     entry_idx,
@@ -233,8 +235,8 @@ class Storage:
 
             case False, True:
                 await self.apply_insert_spill(entry, op.v_high, op.v_low)
-
-        return bucket_ds
+        assert assumption(bucket_ds, Dataset)
+        return bucket_ds  # type: ignore
 
     async def apply_insert_promote(
         self,
@@ -248,65 +250,149 @@ class Storage:
         value_low: int,
     ) -> None:
         """Promote inline entry to ValueSet (spill) mode when both slots are full."""
-        slot0, slot1 = entry["slots"]
+        # Directly fetch the slot values from the dataset to ensure correctness
+        slots = bucket_ds[entry_idx]["slots"]
 
-        value1 = (slot0["high"] << 64) | slot0["low"]
-        value2 = (slot1["high"] << 64) | slot1["low"]
+        def slot_to_int(slot):
+            return (int(slot["high"]) << 64) | int(slot["low"])
+
+        value1 = slot_to_int(slots[0])
+        value2 = slot_to_int(slots[1])
         new_value = (value_high << 64) | value_low
-
         values = [value1, value2, new_value]
+        # DEBUG print removed
 
-        sp_group = self._get_valueset_group(self.file)
+        sp_group = self._get_valueset_group()
         ds_name = _get_spill_ds_name(bucket_id, key_high, key_low)
 
         if ds_name in sp_group:
             del sp_group[ds_name]
 
+        spill_dtype = np.dtype([("high", "<u8"), ("low", "<u8")])
+        # DEBUG print removed
         ds = sp_group.create_dataset(
-            ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
+            ds_name, shape=(len(values),), maxshape=(None,), dtype=spill_dtype
         )
-        ds[:] = [int(v) for v in values]
+        encoded = [(int(v) >> 64, int(v) & 0xFFFFFFFFFFFFFFFF) for v in values]
+        # DEBUG print removed
+        ds[:] = encoded
+        # Immediately read back and print contents, type, shape
+        # DEBUG print removed
+        # DEBUG print removed
+        # DEBUG print removed
 
-        spill_ptr = ds.id.ref
+        # Store the dataset name as the spill pointer (as high/low for compatibility)
+        # Use: slot1["high"] = bucket_id, slot1["low"] = key_high
+        # Always use entry["key_low"] for dataset name construction
         entry["slots"][0]["high"] = 0
         entry["slots"][0]["low"] = 0
-        entry["slots"][1]["high"] = int(spill_ptr) >> 64
-        entry["slots"][1]["low"] = int(spill_ptr) & 0xFFFFFFFFFFFFFFFF
+        entry["slots"][1]["high"] = bucket_id
+        entry["slots"][1]["low"] = key_high
 
+        # Ensure entry["key_low"] is preserved and not modified
+        # (no change needed if not modified elsewhere)
         bucket_ds[entry_idx] = entry
 
     def _get_valueset_group(self):
         """Get or create the valueset group for spill datasets."""
+        # Ensure /values is a group
+        if "/values" in self.file and not isinstance(self.file["/values"], Group):
+            # DEBUG print removed
+            del self.file["/values"]
         if "/values" not in self.file:
             self.file.create_group("/values")
         values_group = self.file["/values"]
         assumption(values_group, Group)
+        # Ensure /values/sp is a group
+        if "sp" in values_group and not isinstance(values_group["sp"], Group):
+            # DEBUG print removed
+            del values_group["sp"]
         if "sp" not in values_group:
             values_group.create_group("sp")
         return values_group["sp"]
 
     def get_values(self, entry) -> list[E]:
-        slot0, slot1 = entry["slots"]
-
-        match any(slot0), any(slot1):
-            case (True, False):
-                # Inline Mode, 1 Entry:
-                return [E.from_entry(entry)]
-            case (True, True):
-                # Inline Mode, 2 Entries:
-                return [E.from_entry(s) for s in entry["slots"]]
-
-            case (False, True):
-                # Spill Mode, Spillpointer in slot1
-                ref_int = (slot1["high"] << 64) | slot1["low"]
-                ref_bytes = ref_int.to_bytes(16, "big")
+        """
+        Given a bucket entry, return all values for that entry (inline or spilled).
+        Handles both inline and spill mode.
+        """
+        slots = entry["slots"]
+        # Check for spill mode: slot0 is zero, slot1 is not
+        if (
+            int(slots[0]["high"]) == 0
+            and int(slots[0]["low"]) == 0
+            and (int(slots[1]["high"]) != 0 or int(slots[1]["low"]) != 0)
+        ):
+            # Spill mode: slot1 encodes the dataset name
+            slot = slots[1]
+            bucket_id = int(slot["high"])
+            key_high = int(slot["low"])
+            key_low = int(entry["key_low"])
+            ds_name = _get_spill_ds_name(bucket_id, key_high, key_low)
+            sp_group = self.file["/values/sp"]
+            if ds_name in sp_group:
+                valueset_ds = sp_group[ds_name]
+                # DEBUG print removed
                 try:
-                    valueset_ds = self.file.dereference(ref_bytes)
-                    return [E(v) for v in valueset_ds[:] if v != 0]
-                except Exception:
-                    pass  # Could not dereference, or dataset missing
+                    raw = valueset_ds[:]
+                    # DEBUG print removed
+                    import collections.abc
 
-        return []
+                    if not isinstance(raw, collections.abc.Iterable) or isinstance(
+                        raw, (str, bytes)
+                    ):
+                        raw = [raw]
+                    # DEBUG print removed
+                    # DEBUG print removed
+                    decoded = [
+                        E.from_int((int(v["high"]) << 64) | int(v["low"]))
+                        for v in raw
+                        if int(v["high"]) != 0 or int(v["low"]) != 0
+                    ]
+                    # DEBUG print removed
+                    return decoded
+                except Exception:
+                    # DEBUG print removed
+                    raise
+            return []
+        # Inline mode: slots are structured arrays with 'high' and 'low'
+        values = []
+        for slot in slots:
+            high = int(slot["high"])
+            low = int(slot["low"])
+            if high == 0 and low == 0:
+                continue
+            values.append(E.from_int((high << 64) | low))
+        return values
+
+    async def apply_insert_spill(self, entry, value_high: int, value_low: int) -> None:
+        """
+        Insert a new value into an existing spill (valueset) dataset for the given entry.
+        """
+        # The spill pointer is in slot1: high = bucket_id, low = key_high
+        slot = entry["slots"][1]
+        bucket_id = int(slot["high"])
+        key_high = int(slot["low"])
+        key_low = int(entry["key_low"])
+        ds_name = _get_spill_ds_name(bucket_id, key_high, key_low)
+        sp_group = self._get_valueset_group()
+        from h5py import Dataset, Group
+
+        assert isinstance(sp_group, Group), f"sp_group is not a Group: {type(sp_group)}"
+        if ds_name not in sp_group:
+            raise RuntimeError(f"Spill dataset {ds_name} not found for entry {entry}")
+        ds = sp_group[ds_name]
+        assert isinstance(ds, Dataset), (
+            f"Spill dataset {ds_name} is not a Dataset: {type(ds)}"
+        )
+        # Read current values
+        current = ds[:]
+        # Prepare new value as (high, low)
+        new_value = (int(value_high), int(value_low))
+        # Append new value
+        new_len = len(current) + 1
+        ds.resize((new_len,))
+        ds[-1] = new_value
 
 
 # STANDALONE FUNCTIONS
