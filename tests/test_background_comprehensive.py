@@ -17,7 +17,7 @@ from cidstore.keys import E
 from cidstore.storage import Storage
 from cidstore.store import CIDStore
 from cidstore.wal import WAL
-
+from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
 
 def make_key(high: int, low: int) -> E:
     """Helper function to create E from high/low values."""
@@ -40,19 +40,18 @@ async def test_background_maintenance_full_cycle():
     store = make_store()
 
     # Verify background maintenance is running
-    assert hasattr(store, "maintenance_thread")
-    assert store.maintenance_thread.is_alive()
+
+    assert hasattr(store, "maintenance_manager")
+    assert hasattr(store.maintenance_manager, "maintenance_thread")
+    assert store.maintenance_manager.maintenance_thread.is_alive()
 
     # Stop automatic background to control timing
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
     time.sleep(0.1)
 
     # Create manual background maintenance with aggressive thresholds
-    from cidstore.store import BackgroundMaintenance
-
-    test_maintenance = BackgroundMaintenance(
-        store, interval=1, sort_threshold=2, merge_threshold=1
-    )
+    config = MaintenanceConfig(maintenance_interval=1, sort_threshold=2, merge_threshold=1)
+    test_maintenance = BackgroundMaintenance(store, config)
 
     # Insert data to create unsorted regions
     keys = [make_key(1, i) for i in [100, 50, 200, 75, 150]]
@@ -77,7 +76,7 @@ async def test_background_maintenance_full_cycle():
     print("✅ All data accessible after maintenance cycle")
 
     # Cleanup
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
 
 @pytest.mark.asyncio
@@ -86,14 +85,14 @@ async def test_background_sort_threshold_behavior():
     print("📊 Testing sort threshold behavior...")
 
     store = make_store()
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
     # Create maintenance with high threshold
-    from cidstore.store import BackgroundMaintenance
-
     high_threshold_maintenance = BackgroundMaintenance(
-        store, sort_threshold=100, merge_threshold=50
+        store, store.maintenance_manager.config
     )
+    high_threshold_maintenance.config.sort_threshold = 100
+    high_threshold_maintenance.config.merge_threshold = 50
 
     # Insert few items (below threshold)
     await store.insert(make_key(1, 10), make_key(2, 1010))
@@ -105,7 +104,7 @@ async def test_background_sort_threshold_behavior():
     print("✅ Sort threshold behavior working correctly")
 
     # Cleanup
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
 
 @pytest.mark.asyncio
@@ -114,16 +113,16 @@ async def test_background_maintenance_with_wal_integration():
     print("🔄 Testing WAL integration...")
 
     store = make_store()
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
     # Verify WAL analyzer exists
-    assert hasattr(store, "wal_analyzer"), "Store should have WAL analyzer"
+    assert hasattr(store, "maintenance_manager"), "Store should have maintenance_manager"
+    assert hasattr(store.maintenance_manager, "wal_analyzer_thread"), "Store should have wal_analyzer_thread"
 
-    from cidstore.store import BackgroundMaintenance
-
-    test_maintenance = BackgroundMaintenance(
-        store, interval=1, sort_threshold=5, merge_threshold=3
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=5, merge_threshold=3
     )
+    test_maintenance = BackgroundMaintenance(store, config)
 
     # Insert data and record operations
     for i in range(10):
@@ -138,7 +137,7 @@ async def test_background_maintenance_with_wal_integration():
     print("✅ WAL integration working correctly")
 
     # Cleanup
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
 
 @pytest.mark.asyncio
@@ -148,7 +147,7 @@ async def test_background_maintenance_statistics():
 
     store = make_store()
     # Get initial stats
-    initial_stats = store.maintenance_thread.get_stats()
+    initial_stats = store.maintenance_manager.maintenance_thread.get_stats()
     assert initial_stats["running"]
     assert initial_stats["interval"] == 30
     assert initial_stats["sort_threshold"] == 16
@@ -158,10 +157,10 @@ async def test_background_maintenance_statistics():
     print(f"📊 Initial stats: {initial_stats}")
 
     # Stop and verify
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
     time.sleep(0.1)
 
-    final_stats = store.maintenance_thread.get_stats()
+    final_stats = store.maintenance_manager.maintenance_thread.get_stats()
     assert not final_stats["running"]
 
     print("✅ Statistics tracking working correctly")
@@ -173,13 +172,12 @@ async def test_background_maintenance_error_handling():
     print("⚠️ Testing error handling...")
 
     store = make_store()
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
-    from cidstore.store import BackgroundMaintenance
-
-    test_maintenance = BackgroundMaintenance(
-        store, interval=1, sort_threshold=1, merge_threshold=1
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=1, merge_threshold=1
     )
+    test_maintenance = BackgroundMaintenance(store, config)
 
     # Even if there are issues, maintenance should not crash
     try:
@@ -190,7 +188,7 @@ async def test_background_maintenance_error_handling():
         pytest.fail(f"Background maintenance crashed: {e}")
 
     # Cleanup
-    store.maintenance_thread.stop()
+    store.maintenance_manager.maintenance_thread.stop()
 
 
 async def run_all_tests():

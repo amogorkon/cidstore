@@ -37,3 +37,7 @@ warn_unused_ignores = true
 
 [tool.ruff]
 target-version = "py312"
+
+[tool.pytest.ini_options]
+timeout = 20
+timeout_method = "thread"

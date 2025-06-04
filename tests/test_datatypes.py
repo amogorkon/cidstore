@@ -52,17 +52,13 @@ async def test_e_in_valueset_and_hashentry(directory):
     assert "key_low" in entry
     assert "slots" in entry
     assert "checksum" in entry
-    # Check that slots is a list/tuple of length 2 (inline) or a SpillPointer (external)
     slots = entry["slots"]
     if isinstance(slots, (list, tuple)):
         assert len(slots) == 2
-    # Check checksum is 16 bytes (int or bytes)
     checksum = entry["checksum"]
     assert isinstance(checksum, (int, bytes))
-    # Optionally, check for sorted_count if present
     if "sorted_count" in entry:
         assert isinstance(entry["sorted_count"], int)
-    # Repeat for key
     entry = await directory.get_entry(key)
     assert "key_high" in entry
     assert "key_low" in entry

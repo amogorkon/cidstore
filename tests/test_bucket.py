@@ -1,5 +1,5 @@
 """
-Node/Bucket structure and split/merge tests for the canonical hash directory model (Spec 2, 3, 6).
+Bucket structure and split/merge tests for the canonical hash directory model (Spec 2, 3, 6).
 All tests are TDD-style and implementation-agnostic.
 """
 
@@ -11,8 +11,9 @@ pytestmark = pytest.mark.asyncio
 @pytest.mark.xfail(reason="Bucket split logic not implemented")
 async def test_bucket_split(bucket):
     """Inserting enough entries should trigger a split; check split invariants."""
+    from cidstore.keys import E
     for i in range(bucket.SPLIT_THRESHOLD + 1):
-        await bucket.insert(f"k{i}", i)
+        await bucket.insert(E.from_str(f"k{i}"), E(i))
     new_bucket, sep = await bucket.split()
     assert await bucket.validate()
     assert await new_bucket.validate()
@@ -23,8 +24,9 @@ async def test_bucket_split(bucket):
 @pytest.mark.xfail(reason="Sorted/unsorted region logic not implemented")
 async def test_sorted_unsorted_region_logic(bucket):
     """Test sorted/unsorted region logic per spec 3 (placeholder if not implemented)."""
+    from cidstore.keys import E
     for i in range(10):
-        await bucket.insert(f"srt{i}", i)
+        await bucket.insert(E.from_str(f"srt{i}"), E(i))
     sorted_count = await bucket.get_sorted_count()
     assert 0 <= sorted_count <= await bucket.size()
     # Optionally, check that the sorted region is actually sorted
@@ -34,15 +36,23 @@ async def test_sorted_unsorted_region_logic(bucket):
 
 async def test_bucket_structure_and_types(bucket):
     """Check that the bucket structure matches canonical data types (Spec 2)."""
-    await bucket.insert("bigkey", 1 << 64)
-    entry = await bucket.get_entry("bigkey")
+    from cidstore.keys import E
+    await bucket.insert(E.from_str("bigkey"), E(1 << 64))
+    entry = await bucket.get_entry(E.from_str("bigkey"))
+    assert "key_high" in entry
+    assert "key_low" in entry
+    assert "slots" in entry
+    assert "checksum" in entry
     assert isinstance(entry["key_high"], int)
     assert entry["key_high"] == 1
 
 
 async def test_directory_entry_structure(directory):
     """Check that directory entries match canonical structure (Spec 2)."""
-    await directory.insert("dirkey", 123)
-    entry = await directory.get_entry("dirkey")
+    from cidstore.keys import E
+    await directory.insert(E.from_str("dirkey"), E(123))
+    entry = await directory.get_entry(E.from_str("dirkey"))
     assert "key_high" in entry
-    assert "value" in entry
+    assert "key_low" in entry
+    assert "slots" in entry
+    assert "checksum" in entry

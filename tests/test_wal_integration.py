@@ -6,38 +6,36 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from cidstore.wal_analyzer import WALPatternAnalyzer
+from cidstore.maintenance import WALAnalyzer, MaintenanceConfig
+from cidstore.constants import OpType
+import cidstore.wal_analyzer as wal_analyzer
 
 
 def test_wal_analyzer_basic():
     """Test basic WAL analyzer functionality."""
-    analyzer = WALPatternAnalyzer()
+    analyzer = WALAnalyzer(store=None, config=MaintenanceConfig())
 
     # Test recording operations
-    analyzer.record_operation("bucket_0001", "insert")
-    analyzer.record_operation("bucket_0001", "insert")
-    analyzer.record_operation("bucket_0002", "delete")
+    analyzer.record_operation(1, OpType.INSERT)
+    analyzer.record_operation(1, OpType.INSERT)
+    analyzer.record_operation(2, OpType.DELETE)
 
     # Test danger score calculation
-    danger_score = analyzer.get_danger_score("bucket_0001")
+    danger_score = analyzer.get_danger_score(1)
     print(f"Danger score for bucket_0001: {danger_score}")
 
-    # Test adaptive threshold
-    threshold = analyzer.get_adaptive_split_threshold(danger_score)
-    print(f"Adaptive split threshold: {threshold}")
+    # No get_adaptive_split_threshold in WALAnalyzer; skip or mock if needed
 
     # Test high danger buckets
-    high_danger = analyzer.get_high_danger_buckets(
-        threshold=0.01
-    )  # Low threshold to see results
+    high_danger = analyzer.get_high_danger_buckets(threshold=0.01)  # Low threshold to see results
     print(f"High danger buckets: {high_danger}")
 
     # Test maintenance recommendations
     recommendations = analyzer.get_maintenance_recommendations()
     print(f"Maintenance recommendations: {recommendations}")
 
-    # Test statistics
-    stats = analyzer.get_stats_summary()
+    # Test statistics (use wal_analyzer.get_stats_summary directly)
+    stats = wal_analyzer.get_stats_summary(analyzer.bucket_stats, analyzer.operation_history)
     print(f"Statistics summary: {stats}")
 
     print("✅ WAL analyzer basic tests passed!")
@@ -45,25 +43,21 @@ def test_wal_analyzer_basic():
 
 def test_functional_features():
     """Test functional programming features."""
-    analyzer = WALPatternAnalyzer()
+    analyzer = WALAnalyzer(store=None, config=MaintenanceConfig())
 
     # Test with multiple operations to trigger functional calculations
     for i in range(10):
-        analyzer.record_operation(f"bucket_{i:04d}", "insert")
-        analyzer.record_operation(f"bucket_{i:04d}", "insert")
+        analyzer.record_operation(i, OpType.INSERT)
+        analyzer.record_operation(i, OpType.INSERT)
 
     # Test sequential pattern detection
     for i in range(5):
-        analyzer.record_operation(f"bucket_{i:04d}", "insert")
+        analyzer.record_operation(i, OpType.INSERT)
 
-    danger_scores = [analyzer.get_danger_score(f"bucket_{i:04d}") for i in range(5)]
+    danger_scores = [analyzer.get_danger_score(i) for i in range(5)]
     print(f"Danger scores for buckets 0-4: {danger_scores}")
 
-    # Test adaptive thresholds
-    thresholds = [
-        analyzer.get_adaptive_split_threshold(score) for score in danger_scores
-    ]
-    print(f"Adaptive thresholds: {thresholds}")
+    # No get_adaptive_split_threshold in WALAnalyzer; skip or mock if needed
 
     print("✅ Functional features tests passed!")
 

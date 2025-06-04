@@ -23,10 +23,8 @@ async def test_hdf5_file_layout(tmp_path):
     with h5py.File(f, "r") as h5f:
         # Check root groups
         assert any(x in h5f for x in ("buckets", "directory"))
-        # Check config attributes
-        assert any("config" in str(x) for x in h5f) or any(
-            "config" in str(g) for g in h5f
-        )
+        # Check config group exists
+        assert "config" in h5f
         # Check for WAL dataset
         found_wal = any("wal" in str(k) for k in h5f.keys()) or any(
             "wal" in str(g) for g in h5f

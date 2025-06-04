@@ -1,6 +1,4 @@
-
 import time
-import pytest
 import io
 from cidstore.keys import E
 from cidstore.storage import Storage
@@ -172,3 +170,27 @@ def test_unpack_record_bad_checksum():
     # Corrupt the checksum
     rec_bytes[-4:] = b"\x00\x00\x00\x00"
     assert unpack_record(bytes(rec_bytes)) is None
+
+@pytest.mark.asyncio
+async def test_wal_file_recovery(tmp_path):
+    from pathlib import Path
+    file = Path(tmp_path) / "walrec.h5"
+    walfile = Path(tmp_path) / "walrec.wal"
+    storage1 = Storage(path=file)
+    wal1 = WAL(path=walfile)
+    tree1 = CIDStore(storage1, wal1)
+    k = E.from_str("recov")
+    v = E(1)
+    await tree1.insert(k, v)
+    if storage1.file:
+        storage1.file.close()
+    wal1.close()
+
+    # Reopen storage and tree -> WAL should replay
+    storage2 = Storage(path=file)
+    wal2 = WAL(path=walfile)
+    tree2 = CIDStore(storage2, wal2)
+    result = await tree2.get(k)
+    assert list(result) == [v]
+    storage2.close()
+    wal2.close()

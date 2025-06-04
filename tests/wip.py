@@ -17,15 +17,18 @@ async def test_standard_workflow():
     await store.async_init()
 
     k = E.from_str("multi")
-    a, b, c = E(1), E(2), E(3)
+    print(k)
+    a, b, c, d = E(1), E(2), E(3), E(4)
     await store.insert(k, a)
     print(list(await store.get(k)))
     await store.insert(k, b)
     print(list(await store.get(k)))
     await store.insert(k, c)
     print(list(await store.get(k)))
+    await store.insert(k, d)
+    print(list(await store.get(k)))
     values = list(await store.get(k))
-    assert values == [E(1), E(2), E(3)]
+    assert values == [E(1), E(2), E(3), E(4)], values
 
 
 # ===========================================

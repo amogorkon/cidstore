@@ -81,9 +81,10 @@ async def test_concurrent_deletion_and_gc(directory):
 
 @pytest.mark.xfail(reason="compact not implemented")
 async def test_idempotent_gc(directory):
-    key = "idempotent"
-    await directory.insert(key, 1)
-    await directory.delete(key, 1)
+    from cidstore.keys import E
+    key = E.from_str("idempotent")
+    await directory.insert(key, E(1))
+    await directory.delete(key, E(1))
     await directory.compact(key)
     await directory.compact(key)
     assert await directory.lookup(key) == []
@@ -91,19 +92,21 @@ async def test_idempotent_gc(directory):
 
 @pytest.mark.xfail(reason="recover not implemented")
 async def test_wal_and_deletion_log_replay(directory):
-    key = "replay"
-    await directory.insert(key, 123)
-    await directory.delete(key, 123)
+    from cidstore.keys import E
+    key = E.from_str("replay")
+    await directory.insert(key, E(123))
+    await directory.delete(key, E(123))
     await directory.recover()
     assert await directory.lookup(key) == []
 
 
 @pytest.mark.xfail(reason="rebalance_buckets not implemented")
 async def test_underfilled_bucket_merge(directory):
+    from cidstore.keys import E
     for i in range(20):
-        await directory.insert(f"bucket{i}", i)
+        await directory.insert(E.from_str(f"bucket{i}"), E(i))
     for i in range(20):
-        await directory.delete(f"bucket{i}", i)
+        await directory.delete(E.from_str(f"bucket{i}"), E(i))
     await directory.rebalance_buckets()
     for i in range(20):
-        assert await directory.lookup(f"bucket{i}") == []
+        assert await directory.lookup(E.from_str(f"bucket{i}")) == []
