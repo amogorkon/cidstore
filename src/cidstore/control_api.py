@@ -43,6 +43,7 @@ async def ready():
 
 # Prometheus metrics endpoint
 
+
 @app.get("/metrics/prometheus")
 async def prometheus_metrics():
     if generate_latest is None:
@@ -53,7 +54,10 @@ async def prometheus_metrics():
     # Use the default registry for production, but allow tests to patch this endpoint to use a custom registry
     try:
         from prometheus_client import REGISTRY
-        return PlainTextResponse(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+
+        return PlainTextResponse(
+            generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST
+        )
     except Exception:
         # fallback to default
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)

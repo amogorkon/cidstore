@@ -600,7 +600,9 @@ class MaintenanceManager:
         self.config = config or MaintenanceConfig()
 
         # Initialize deletion log
-        h5file = self.store.hdf.file if hasattr(self.store.hdf, 'file') else self.store.hdf
+        h5file = (
+            self.store.hdf.file if hasattr(self.store.hdf, "file") else self.store.hdf
+        )
         self.deletion_log = DeletionLog(h5file)
 
         # Initialize background threads

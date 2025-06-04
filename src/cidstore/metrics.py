@@ -9,7 +9,8 @@ PROMETHEUS_AVAILABLE = False
 
 
 try:
-    from prometheus_client import Counter, Gauge, CollectorRegistry
+    from prometheus_client import CollectorRegistry, Counter, Gauge
+
     PROMETHEUS_AVAILABLE = True
 
     def create_wal_metrics(registry=None):
@@ -21,7 +22,9 @@ try:
             registry=registry,
         )
         wal_replay_count = Counter(
-            "cidtree_wal_replay_total", "Total number of WAL replays completed", registry=registry
+            "cidtree_wal_replay_total",
+            "Total number of WAL replays completed",
+            registry=registry,
         )
         wal_crc_failures = Counter(
             "cidtree_wal_crc_failures_total",
@@ -29,7 +32,9 @@ try:
             registry=registry,
         )
         wal_truncate_count = Counter(
-            "cidtree_wal_truncate_total", "Total number of WAL truncations completed", registry=registry
+            "cidtree_wal_truncate_total",
+            "Total number of WAL truncations completed",
+            registry=registry,
         )
         wal_error_count = Counter(
             "cidtree_wal_error_total",
@@ -81,7 +86,6 @@ try:
     wal_buffer_capacity_bytes = _default_metrics["wal_buffer_capacity_bytes"]
     wal_records_in_buffer = _default_metrics["wal_records_in_buffer"]
 except ImportError:
-
     # Create dummy objects for when prometheus_client is not available
     class DummyMetric:
         def inc(self, *args, **kwargs):
@@ -165,11 +169,22 @@ class MetricsCollector:
         """
         try:
             from prometheus_client import Gauge, Info
-            cidstore_info = Info("cidstore_info", "CIDStore information", registry=registry)
-            split_events_counter = Gauge("cidstore_split_events", "Split events count", registry=registry)
-            merge_events_counter = Gauge("cidstore_merge_events", "Merge events count", registry=registry)
-            gc_runs_counter = Gauge("cidstore_gc_runs", "GC runs count", registry=registry)
-            last_error_info = Info("cidstore_last_error", "Last error info", registry=registry)
+
+            cidstore_info = Info(
+                "cidstore_info", "CIDStore information", registry=registry
+            )
+            split_events_counter = Gauge(
+                "cidstore_split_events", "Split events count", registry=registry
+            )
+            merge_events_counter = Gauge(
+                "cidstore_merge_events", "Merge events count", registry=registry
+            )
+            gc_runs_counter = Gauge(
+                "cidstore_gc_runs", "GC runs count", registry=registry
+            )
+            last_error_info = Info(
+                "cidstore_last_error", "Last error info", registry=registry
+            )
 
             # Set metrics values
             cidstore_info.info({"version": "1.0"})
@@ -298,7 +313,9 @@ class AutoTuner:
         """Get current auto-tune state for monitoring."""
         return self._autotune_state.copy()
 
-    def expose_metrics(self, registry=None, metrics_collector=None, buckets=None, directory=None) -> list[Any]:
+    def expose_metrics(
+        self, registry=None, metrics_collector=None, buckets=None, directory=None
+    ) -> list[Any]:
         """
         Expose metrics for Prometheus scraping.
         Delegate to MetricsCollector with additional bucket/directory data.
@@ -307,12 +324,19 @@ class AutoTuner:
         """
         try:
             from prometheus_client import Gauge
+
             if metrics_collector is not None:
-                base_metrics = metrics_collector.expose_prometheus_metrics(registry=registry)
+                base_metrics = metrics_collector.expose_prometheus_metrics(
+                    registry=registry
+                )
             else:
                 base_metrics = []
-            bucket_gauge = Gauge("cidstore_buckets", "Number of buckets", registry=registry)
-            directory_size_gauge = Gauge("cidstore_directory_size", "Directory size", registry=registry)
+            bucket_gauge = Gauge(
+                "cidstore_buckets", "Number of buckets", registry=registry
+            )
+            directory_size_gauge = Gauge(
+                "cidstore_directory_size", "Directory size", registry=registry
+            )
             bucket_gauge.set(len(buckets) if buckets is not None else 0)
             directory_size_gauge.set(len(directory) if directory is not None else 0)
             return base_metrics + [bucket_gauge, directory_size_gauge]
