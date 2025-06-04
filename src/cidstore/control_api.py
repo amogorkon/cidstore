@@ -42,6 +42,7 @@ async def ready():
 
 
 # Prometheus metrics endpoint
+
 @app.get("/metrics/prometheus")
 async def prometheus_metrics():
     if generate_latest is None:
@@ -49,8 +50,13 @@ async def prometheus_metrics():
     global store
     if store is None or not hasattr(store, "metrics_collector"):
         return PlainTextResponse("metrics not available", status_code=503)
-    # Expose all metrics
-    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    # Use the default registry for production, but allow tests to patch this endpoint to use a custom registry
+    try:
+        from prometheus_client import REGISTRY
+        return PlainTextResponse(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+    except Exception:
+        # fallback to default
+        return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # Human-readable metrics endpoint (legacy)

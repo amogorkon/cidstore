@@ -262,27 +262,27 @@ class BackgroundMaintenance(threading.Thread):
     async def _sort_unsorted_regions(self):
         """Sort buckets with large unsorted regions."""
         try:
-            with self.store.hdf as f:
-                buckets_group = f["/buckets"]
-                bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
+            f = self.store.hdf
+            buckets_group = f["/buckets"]
+            bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
 
-                for bucket_id in bucket_ids:
-                    bucket = buckets_group[f"bucket_{bucket_id:04d}"]
-                    sorted_count = int(bucket.attrs.get("sorted_count", 0))
-                    total = bucket.shape[0]
-                    unsorted_count = total - sorted_count
+            for bucket_id in bucket_ids:
+                bucket = buckets_group[f"bucket_{bucket_id:04d}"]
+                sorted_count = int(bucket.attrs.get("sorted_count", 0))
+                total = bucket.shape[0]
+                unsorted_count = total - sorted_count
 
-                    if unsorted_count >= self.config.sort_threshold:
-                        # Sort the bucket
-                        all_entries = list(bucket[:])
-                        all_entries.sort(key=lambda e: (e["key_high"], e["key_low"]))
-                        bucket[:] = all_entries
-                        bucket.attrs["sorted_count"] = total
-                        bucket.flush()
+                if unsorted_count >= self.config.sort_threshold:
+                    # Sort the bucket
+                    all_entries = list(bucket[:])
+                    all_entries.sort(key=lambda e: (e["key_high"], e["key_low"]))
+                    bucket[:] = all_entries
+                    bucket.attrs["sorted_count"] = total
+                    bucket.flush()
 
-                        # Log the operation
-                        if hasattr(self.store, "metrics"):
-                            self.store.metrics.background_sorts += 1
+                    # Log the operation
+                    if hasattr(self.store, "metrics"):
+                        self.store.metrics.background_sorts += 1
 
         except Exception as e:
             logger.error(f"[BackgroundMaintenance] Sort error: {e}")
@@ -290,23 +290,23 @@ class BackgroundMaintenance(threading.Thread):
     async def _merge_underfull_buckets(self):
         """Merge buckets that are underfull."""
         try:
-            with self.store.hdf as f:
-                buckets_group = f["/buckets"]
-                bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
+            f = self.store.hdf
+            buckets_group = f["/buckets"]
+            bucket_ids = [int(name.split("_")[-1]) for name in buckets_group]
 
-                for bucket_id in bucket_ids:
-                    bucket = buckets_group[f"bucket_{bucket_id:04d}"]
-                    entry_count = int(bucket.attrs.get("entry_count", 0))
-                    local_depth = int(bucket.attrs.get("local_depth", 1))
+            for bucket_id in bucket_ids:
+                bucket = buckets_group[f"bucket_{bucket_id:04d}"]
+                entry_count = int(bucket.attrs.get("entry_count", 0))
+                local_depth = int(bucket.attrs.get("local_depth", 1))
 
-                    if local_depth > 1 and entry_count <= self.config.merge_threshold:
-                        await self.store._maybe_merge_bucket(
-                            bucket_id, merge_threshold=self.config.merge_threshold
-                        )
+                if local_depth > 1 and entry_count <= self.config.merge_threshold:
+                    await self.store._maybe_merge_bucket(
+                        bucket_id, merge_threshold=self.config.merge_threshold
+                    )
 
-                        # Log the operation
-                        if hasattr(self.store, "metrics"):
-                            self.store.metrics.background_merges += 1
+                    # Log the operation
+                    if hasattr(self.store, "metrics"):
+                        self.store.metrics.background_merges += 1
 
         except Exception as e:
             logger.error(f"[BackgroundMaintenance] Merge error: {e}")
@@ -348,7 +348,7 @@ class WALAnalyzer(threading.Thread):
         self.bucket_stats: Dict[int, wal_analyzer.BucketStats] = {}
         self.operation_history: List[wal_analyzer.Operation] = []
         self._last_run = 0.0
-        self._operation_lock = threading.Lock()
+        self._operation_lock = threading.RLock()
 
     def record_operation(self, bucket_id: int, op_type: OpType) -> None:
         """Record an operation for sophisticated analysis."""
@@ -600,8 +600,8 @@ class MaintenanceManager:
         self.config = config or MaintenanceConfig()
 
         # Initialize deletion log
-        with self.store.hdf as f:
-            self.deletion_log = DeletionLog(f)
+        h5file = self.store.hdf.file if hasattr(self.store.hdf, 'file') else self.store.hdf
+        self.deletion_log = DeletionLog(h5file)
 
         # Initialize background threads
         self.gc_thread = BackgroundGC(self.store, self.config)

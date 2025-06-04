@@ -7,46 +7,79 @@ from typing import Any, Dict
 
 PROMETHEUS_AVAILABLE = False
 
-try:
-    from prometheus_client import Counter, Gauge
 
+try:
+    from prometheus_client import Counter, Gauge, CollectorRegistry
     PROMETHEUS_AVAILABLE = True
-    wal_records_appended = Counter(
-        "cidtree_wal_records_appended_total",
-        "Total number of records appended to the WAL",
-        ["operation"],
-    )
-    wal_replay_count = Counter(
-        "cidtree_wal_replay_total", "Total number of WAL replays completed"
-    )
-    wal_crc_failures = Counter(
-        "cidtree_wal_crc_failures_total",
-        "Total CRC checksum failures detected during replay",
-    )
-    wal_truncate_count = Counter(
-        "cidtree_wal_truncate_total", "Total number of WAL truncations completed"
-    )
-    wal_error_count = Counter(
-        "cidtree_wal_error_total",
-        "Total WAL errors encountered",
-        ["type"],
-    )
-    wal_head_position = Gauge(
-        "cidtree_wal_head_position",
-        "Current head pointer position (byte offset) in the WAL buffer",
-    )
-    wal_tail_position = Gauge(
-        "cidtree_wal_tail_position",
-        "Current tail pointer position (byte offset) in the WAL buffer",
-    )
-    wal_buffer_capacity_bytes = Gauge(
-        "cidtree_wal_buffer_capacity_bytes",
-        "Total buffer capacity in bytes",
-    )
-    wal_records_in_buffer = Gauge(
-        "cidtree_wal_records_in_buffer",
-        "Current number of records in the WAL buffer",
-    )
+
+    def create_wal_metrics(registry=None):
+        registry = registry or None  # None means use default global registry
+        wal_records_appended = Counter(
+            "cidtree_wal_records_appended_total",
+            "Total number of records appended to the WAL",
+            ["operation"],
+            registry=registry,
+        )
+        wal_replay_count = Counter(
+            "cidtree_wal_replay_total", "Total number of WAL replays completed", registry=registry
+        )
+        wal_crc_failures = Counter(
+            "cidtree_wal_crc_failures_total",
+            "Total CRC checksum failures detected during replay",
+            registry=registry,
+        )
+        wal_truncate_count = Counter(
+            "cidtree_wal_truncate_total", "Total number of WAL truncations completed", registry=registry
+        )
+        wal_error_count = Counter(
+            "cidtree_wal_error_total",
+            "Total WAL errors encountered",
+            ["type"],
+            registry=registry,
+        )
+        wal_head_position = Gauge(
+            "cidtree_wal_head_position",
+            "Current head pointer position (byte offset) in the WAL buffer",
+            registry=registry,
+        )
+        wal_tail_position = Gauge(
+            "cidtree_wal_tail_position",
+            "Current tail pointer position (byte offset) in the WAL buffer",
+            registry=registry,
+        )
+        wal_buffer_capacity_bytes = Gauge(
+            "cidtree_wal_buffer_capacity_bytes",
+            "Total buffer capacity in bytes",
+            registry=registry,
+        )
+        wal_records_in_buffer = Gauge(
+            "cidtree_wal_records_in_buffer",
+            "Current number of records in the WAL buffer",
+            registry=registry,
+        )
+        return {
+            "wal_records_appended": wal_records_appended,
+            "wal_replay_count": wal_replay_count,
+            "wal_crc_failures": wal_crc_failures,
+            "wal_truncate_count": wal_truncate_count,
+            "wal_error_count": wal_error_count,
+            "wal_head_position": wal_head_position,
+            "wal_tail_position": wal_tail_position,
+            "wal_buffer_capacity_bytes": wal_buffer_capacity_bytes,
+            "wal_records_in_buffer": wal_records_in_buffer,
+        }
+
+    # Default global metrics (for production)
+    _default_metrics = create_wal_metrics()
+    wal_records_appended = _default_metrics["wal_records_appended"]
+    wal_replay_count = _default_metrics["wal_replay_count"]
+    wal_crc_failures = _default_metrics["wal_crc_failures"]
+    wal_truncate_count = _default_metrics["wal_truncate_count"]
+    wal_error_count = _default_metrics["wal_error_count"]
+    wal_head_position = _default_metrics["wal_head_position"]
+    wal_tail_position = _default_metrics["wal_tail_position"]
+    wal_buffer_capacity_bytes = _default_metrics["wal_buffer_capacity_bytes"]
+    wal_records_in_buffer = _default_metrics["wal_records_in_buffer"]
 except ImportError:
 
     # Create dummy objects for when prometheus_client is not available
@@ -71,20 +104,11 @@ except ImportError:
     wal_records_in_buffer = DummyMetric()
 
 
-def get_wal_prometheus_metrics() -> list[Any]:
-    """Get all WAL Prometheus metrics."""
+def get_wal_prometheus_metrics(registry=None) -> list[Any]:
+    """Get all WAL Prometheus metrics for a given registry (or default)."""
     if PROMETHEUS_AVAILABLE:
-        return [
-            wal_records_appended,
-            wal_replay_count,
-            wal_crc_failures,
-            wal_truncate_count,
-            wal_error_count,
-            wal_head_position,
-            wal_tail_position,
-            wal_buffer_capacity_bytes,
-            wal_records_in_buffer,
-        ]
+        metrics = create_wal_metrics(registry=registry)
+        return list(metrics.values())
     return []
 
 
@@ -133,30 +157,27 @@ class MetricsCollector:
         """Set the last error message."""
         self._last_error = error
 
-    def expose_prometheus_metrics(self) -> list[Any]:
+    def expose_prometheus_metrics(self, registry=None) -> list[Any]:
         """
         Expose metrics for Prometheus scraping.
         Returns:
             list: Prometheus metric objects if available, else empty list.
         """
         try:
-            from prometheus_client import Gauge, Info  # Define metrics
-
-            cidstore_info = Info("cidstore_info", "CIDStore information")
-            split_events_counter = Gauge("cidstore_split_events", "Split events count")
-            merge_events_counter = Gauge("cidstore_merge_events", "Merge events count")
-            gc_runs_counter = Gauge("cidstore_gc_runs", "GC runs count")
-            last_error_info = Info("cidstore_last_error", "Last error info")
+            from prometheus_client import Gauge, Info
+            cidstore_info = Info("cidstore_info", "CIDStore information", registry=registry)
+            split_events_counter = Gauge("cidstore_split_events", "Split events count", registry=registry)
+            merge_events_counter = Gauge("cidstore_merge_events", "Merge events count", registry=registry)
+            gc_runs_counter = Gauge("cidstore_gc_runs", "GC runs count", registry=registry)
+            last_error_info = Info("cidstore_last_error", "Last error info", registry=registry)
 
             # Set metrics values
             cidstore_info.info({"version": "1.0"})
-            # Note: bucket and directory sizes would need to be passed in or accessed differently
             split_events_counter.set(self._split_events)
             merge_events_counter.set(self._merge_events)
             gc_runs_counter.set(self._gc_runs)
             last_error_info.info({"error": self._last_error})
 
-            # Return all defined metrics for scraping
             return [
                 cidstore_info,
                 split_events_counter,
@@ -165,7 +186,6 @@ class MetricsCollector:
                 last_error_info,
             ]
         except ImportError:
-            # prometheus_client not available, return empty list
             return []
 
 
@@ -278,32 +298,25 @@ class AutoTuner:
         """Get current auto-tune state for monitoring."""
         return self._autotune_state.copy()
 
-    def expose_metrics(self) -> list[Any]:
+    def expose_metrics(self, registry=None, metrics_collector=None, buckets=None, directory=None) -> list[Any]:
         """
         Expose metrics for Prometheus scraping.
         Delegate to MetricsCollector with additional bucket/directory data.
         Returns:
             list: Prometheus metric objects if available, else empty list.
         """
-        # Update metrics collector with current bucket and directory counts
         try:
             from prometheus_client import Gauge
-
-            # Get base metrics from collector
-            base_metrics = self.metrics_collector.expose_prometheus_metrics()
-
-            # Add store-specific metrics
-            bucket_gauge = Gauge("cidstore_buckets", "Number of buckets")
-            directory_size_gauge = Gauge("cidstore_directory_size", "Directory size")
-
-            # Set values
-            bucket_gauge.set(len(getattr(self, "buckets", {})))
-            directory_size_gauge.set(len(self.dir))
-
-            # Combine base and store-specific metrics
+            if metrics_collector is not None:
+                base_metrics = metrics_collector.expose_prometheus_metrics(registry=registry)
+            else:
+                base_metrics = []
+            bucket_gauge = Gauge("cidstore_buckets", "Number of buckets", registry=registry)
+            directory_size_gauge = Gauge("cidstore_directory_size", "Directory size", registry=registry)
+            bucket_gauge.set(len(buckets) if buckets is not None else 0)
+            directory_size_gauge.set(len(directory) if directory is not None else 0)
             return base_metrics + [bucket_gauge, directory_size_gauge]
         except ImportError:
-            # prometheus_client not available, return empty list
             return []
 
 
