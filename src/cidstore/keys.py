@@ -37,7 +37,11 @@ class E(int):
 
     __slots__ = ()
 
-    def __new__(cls, id_: int | str | list[int] | tuple[int, int] | None = None) -> E:
+    def __new__(
+        cls,
+        id_: int | str | list[int] | tuple[int, int] | None = None,
+        b: int | None = None,
+    ) -> E:
         # Delegate to from_jackhash if a string is passed that looks like a JACK hash
         if isinstance(id_, str):
             return cls.from_jackhash(id_)
@@ -50,6 +54,9 @@ class E(int):
             return cls.from_int((int(a) << 64) | int(b))
         if id_ is None:
             id_ = uuid4().int
+        if b is not None:
+            assert assumption(b, int), "b must be an integer"
+            return cls.from_int((int(id_) << 64) | int(b))
         return super().__new__(cls, id_)
 
     @property
