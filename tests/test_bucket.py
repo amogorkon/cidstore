@@ -9,39 +9,39 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.xfail(reason="Bucket split logic not implemented")
-async def test_bucket_split(bucket):
+async def test_bucket_split(store):
     """Inserting enough entries should trigger a split; check split invariants."""
     from cidstore.keys import E
 
-    for i in range(bucket.SPLIT_THRESHOLD + 1):
-        await bucket.insert(E.from_str(f"k{i}"), E(i))
-    new_bucket, sep = await bucket.split()
-    assert await bucket.validate()
+    for i in range(store.SPLIT_THRESHOLD + 1):
+        await store.insert(E.from_str(f"k{i}"), E(i))
+    new_bucket, sep = await store.split()
+    assert await store.validate()
     assert await new_bucket.validate()
-    assert await bucket.size() <= bucket.SPLIT_THRESHOLD
-    assert await new_bucket.size() <= bucket.SPLIT_THRESHOLD
+    assert await store.size() <= store.SPLIT_THRESHOLD
+    assert await new_bucket.size() <= store.SPLIT_THRESHOLD
 
 
 @pytest.mark.xfail(reason="Sorted/unsorted region logic not implemented")
-async def test_sorted_unsorted_region_logic(bucket):
+async def test_sorted_unsorted_region_logic(store):
     """Test sorted/unsorted region logic per spec 3 (placeholder if not implemented)."""
     from cidstore.keys import E
 
     for i in range(10):
-        await bucket.insert(E.from_str(f"srt{i}"), E(i))
-    sorted_count = await bucket.get_sorted_count()
-    assert 0 <= sorted_count <= await bucket.size()
+        await store.insert(E.from_str(f"srt{i}"), E(i))
+    sorted_count = await store.get_sorted_count()
+    assert 0 <= sorted_count <= await store.size()
     # Optionally, check that the sorted region is actually sorted
-    sorted_region = await bucket.get_sorted_region()
+    sorted_region = await store.get_sorted_region()
     assert sorted_region == sorted(sorted_region)
 
 
-async def test_bucket_structure_and_types(bucket):
+async def test_bucket_structure_and_types(store):
     """Check that the bucket structure matches canonical data types (Spec 2)."""
     from cidstore.keys import E
 
-    await bucket.insert(E.from_str("bigkey"), E(1 << 64))
-    entry = await bucket.get_entry(E.from_str("bigkey"))
+    await store.insert(E.from_str("bigkey"), E(1 << 64))
+    entry = await store.get_entry(E.from_str("bigkey"))
     assert "key_high" in entry
     assert "key_low" in entry
     assert "slots" in entry

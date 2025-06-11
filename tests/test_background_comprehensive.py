@@ -1,47 +1,20 @@
 #!/usr/bin/env python3
 """Test comprehensive background merge/sort of unsorted region functionality."""
 
-import asyncio
-import io
-
-# Add src to path for imports
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
 from cidstore.keys import E
 from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
-from cidstore.storage import Storage
-from cidstore.store import CIDStore
-from cidstore.wal import WAL
-
-
-def make_key(high: int, low: int) -> E:
-    """Helper function to create E from high/low values."""
-    return E.from_int((high << 64) | low)
-
-
-def make_store():
-    """Helper to create a test store."""
-    storage = Storage(io.BytesIO())
-    wal = WAL(path=None)  # Use None for in-memory
-    return CIDStore(storage, wal)
 
 
 @pytest.mark.asyncio
-async def test_background_maintenance_full_cycle():
+async def test_background_maintenance_full_cycle(store):
     """Test that background maintenance performs full sort/merge cycle."""
     print("🔧 Testing background maintenance full cycle...")
 
-    # Create store
-    store = make_store()
-
     # Verify background maintenance is running
-
     assert hasattr(store, "maintenance_manager")
     assert hasattr(store.maintenance_manager, "maintenance_thread")
     assert store.maintenance_manager.maintenance_thread.is_alive()
@@ -57,8 +30,8 @@ async def test_background_maintenance_full_cycle():
     test_maintenance = BackgroundMaintenance(store, config)
 
     # Insert data to create unsorted regions
-    keys = [make_key(1, i) for i in [100, 50, 200, 75, 150]]
-    values = [make_key(2, i + 1000) for i in range(len(keys))]
+    keys = [E(1, i) for i in [100, 50, 200, 75, 150]]
+    values = [E(2, i + 1000) for i in range(len(keys))]
 
     for key, value in zip(keys, values):
         await store.insert(key, value)
@@ -83,11 +56,10 @@ async def test_background_maintenance_full_cycle():
 
 
 @pytest.mark.asyncio
-async def test_background_sort_threshold_behavior():
+async def test_background_sort_threshold_behavior(store):
     """Test that sorting only happens when threshold is exceeded."""
     print("📊 Testing sort threshold behavior...")
 
-    store = make_store()
     store.maintenance_manager.maintenance_thread.stop()
 
     # Create maintenance with high threshold
@@ -98,8 +70,8 @@ async def test_background_sort_threshold_behavior():
     high_threshold_maintenance.config.merge_threshold = 50
 
     # Insert few items (below threshold)
-    await store.insert(make_key(1, 10), make_key(2, 1010))
-    await store.insert(make_key(1, 20), make_key(2, 1020))
+    await store.insert(E(1, 10), E(2, 1010))
+    await store.insert(E(1, 20), E(2, 1020))
 
     # Run sort maintenance - should not trigger with high threshold
     await high_threshold_maintenance._sort_unsorted_regions()
@@ -111,11 +83,10 @@ async def test_background_sort_threshold_behavior():
 
 
 @pytest.mark.asyncio
-async def test_background_maintenance_with_wal_integration():
+async def test_background_maintenance_with_wal_integration(store):
     """Test background maintenance integrates with WAL adaptive maintenance."""
     print("🔄 Testing WAL integration...")
 
-    store = make_store()
     store.maintenance_manager.maintenance_thread.stop()
 
     # Verify WAL analyzer exists
@@ -133,8 +104,8 @@ async def test_background_maintenance_with_wal_integration():
 
     # Insert data and record operations
     for i in range(10):
-        key = make_key(1, i)
-        value = make_key(2, i + 1000)
+        key = E(1, i)
+        value = E(2, i + 1000)
         await store.insert(key, value)
         # Operations should be recorded in WAL analyzer automatically
 
@@ -148,19 +119,17 @@ async def test_background_maintenance_with_wal_integration():
 
 
 @pytest.mark.asyncio
-async def test_background_maintenance_statistics():
+async def test_background_maintenance_statistics(store):
     """Test that background maintenance tracks statistics."""
     print("📈 Testing maintenance statistics...")
 
-    store = make_store()
     # Get initial stats
     initial_stats = store.maintenance_manager.maintenance_thread.get_stats()
     assert initial_stats["running"]
     assert initial_stats["interval"] == 30
     assert initial_stats["sort_threshold"] == 16
     assert initial_stats["merge_threshold"] == 8
-    assert initial_stats["last_run"] == 0  # Not run yet
-
+    assert initial_stats["last_run"] > 0  # initialized with current time
     print(f"📊 Initial stats: {initial_stats}")
 
     # Stop and verify
@@ -174,11 +143,9 @@ async def test_background_maintenance_statistics():
 
 
 @pytest.mark.asyncio
-async def test_background_maintenance_error_handling():
+async def test_background_maintenance_error_handling(store):
     """Test that background maintenance handles errors gracefully."""
     print("⚠️ Testing error handling...")
-
-    store = make_store()
     store.maintenance_manager.maintenance_thread.stop()
 
     config = MaintenanceConfig(
@@ -196,29 +163,3 @@ async def test_background_maintenance_error_handling():
 
     # Cleanup
     store.maintenance_manager.maintenance_thread.stop()
-
-
-async def run_all_tests():
-    """Run all background maintenance tests."""
-    print("🚀 Starting background merge/sort tests...\n")
-
-    await test_background_maintenance_full_cycle()
-    print()
-
-    await test_background_sort_threshold_behavior()
-    print()
-
-    await test_background_maintenance_with_wal_integration()
-    print()
-
-    await test_background_maintenance_statistics()
-    print()
-
-    await test_background_maintenance_error_handling()
-    print()
-
-    print("🎉 All background maintenance tests completed successfully!")
-
-
-if __name__ == "__main__":
-    asyncio.run(run_all_tests())

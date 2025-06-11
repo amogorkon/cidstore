@@ -8,7 +8,7 @@ from cidstore.store import CIDStore
 
 
 @pytest_asyncio.fixture
-async def tree():
+async def store():
     # Use an in-memory HDF5 file via BytesIO and StorageManager
     f = io.BytesIO()
     from cidstore.storage import Storage
@@ -24,20 +24,12 @@ async def tree():
         await store.aclose()
 
 
-@pytest_asyncio.fixture
-async def directory(tree):
-    return tree
-
-
-@pytest_asyncio.fixture
-async def bucket(tree):
-    return tree
 
 
 @pytest.fixture
-def wal_analyzer(tree):
-    config = getattr(tree, "config", None) or MaintenanceConfig()
-    analyzer = WALAnalyzer(tree, config)
+def wal_analyzer(store):
+    config = getattr(store, "config", None) or MaintenanceConfig()
+    analyzer = WALAnalyzer(store, config)
     try:
         yield analyzer
     finally:
@@ -46,9 +38,9 @@ def wal_analyzer(tree):
 
 
 @pytest.fixture
-def maintenance_manager(tree):
-    config = getattr(tree, "config", None) or MaintenanceConfig()
-    manager = MaintenanceManager(tree, config)
+def maintenance_manager(store):
+    config = getattr(store, "config", None) or MaintenanceConfig()
+    manager = MaintenanceManager(store, config)
     try:
         yield manager
     finally:

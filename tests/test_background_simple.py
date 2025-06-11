@@ -2,14 +2,12 @@
 """Test background merge/sort functionality - simplified version."""
 
 import asyncio
-
-# Add src to path for imports
-import sys
 import threading
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+import pytest
+
+from cidstore.maintenance import BackgroundMaintenance, MaintenanceConfig
 
 
 class MockStore:
@@ -28,33 +26,26 @@ class MockStore:
         """Mock HDF5 context that doesn't trigger actual file operations."""
         return self
 
-    def __enter__(self):
-        return {"buckets": {}}
-
-    def __exit__(self, *args):
-        pass
-
 
 def test_background_maintenance_class():
     """Test BackgroundMaintenance class initialization and basic operations."""
     print("🔧 Testing BackgroundMaintenance class...")
 
     # Import the class
-    sys.path.insert(0, str(Path(__file__).parent / "src"))
-    from cidstore.store import BackgroundMaintenance
 
     # Create mock store
     mock_store = MockStore()
 
     # Test initialization
-    maintenance = BackgroundMaintenance(
-        mock_store, interval=1, sort_threshold=5, merge_threshold=3
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=5, merge_threshold=3
     )
+    maintenance = BackgroundMaintenance(mock_store, config)
 
     # Test configuration
-    assert maintenance.interval == 1
-    assert maintenance.sort_threshold == 5
-    assert maintenance.merge_threshold == 3
+    assert maintenance.config.maintenance_interval == 1
+    assert maintenance.config.sort_threshold == 5
+    assert maintenance.config.merge_threshold == 3
     assert maintenance.store == mock_store
     assert isinstance(maintenance.stop_event, threading.Event)
 
@@ -84,46 +75,37 @@ def test_background_maintenance_class():
     print("✅ Stop functionality working")
 
 
+@pytest.mark.asyncio
 async def test_maintenance_cycle_components():
     """Test individual maintenance cycle components."""
     print("🔄 Testing maintenance cycle components...")
 
-    from cidstore.store import BackgroundMaintenance
-
     # Create maintenance instance
     mock_store = MockStore()
-    maintenance = BackgroundMaintenance(
-        mock_store, interval=1, sort_threshold=1, merge_threshold=1
+    config = MaintenanceConfig(
+        maintenance_interval=1, sort_threshold=1, merge_threshold=1
     )
+    maintenance = BackgroundMaintenance(mock_store, config)
 
     # Stop the background thread
     maintenance.stop()
 
     # Test _run_maintenance_cycle components
-    try:
-        # This should call adaptive maintenance
-        await maintenance._run_maintenance_cycle()
+    # This should call adaptive maintenance
+    await maintenance._run_maintenance_cycle()
 
-        # Verify adaptive maintenance was called
-        assert mock_store.adaptive_calls == 1
-        print("✅ Adaptive maintenance integration working")
-
-    except Exception as e:
-        # Expected - some methods might not work without real HDF5
-        print(f"⚠️ Expected exception in cycle: {e}")
-        print("✅ Maintenance cycle structure exists")
+    # Verify adaptive maintenance was called
+    assert mock_store.adaptive_calls == 1
+    print("✅ Adaptive maintenance integration working")
 
 
 def test_background_thread_lifecycle():
     """Test the background thread starts and stops properly."""
     print("🧵 Testing background thread lifecycle...")
 
-    from cidstore.store import BackgroundMaintenance
-
     mock_store = MockStore()
-    maintenance = BackgroundMaintenance(
-        mock_store, interval=0.1
-    )  # Fast interval for testing
+    config = MaintenanceConfig(maintenance_interval=1)
+    maintenance = BackgroundMaintenance(mock_store, config)  # Fast interval for testing
 
     # Start the thread manually
     maintenance.start()
@@ -141,30 +123,28 @@ def test_background_thread_lifecycle():
 
     # Give it time to stop
     start_time = time.time()
-    while maintenance.is_alive() and (time.time() - start_time) < 1.0:
+    stopped = False
+    while (time.time() - start_time) < 1.0:
+        if not maintenance.is_alive():
+            stopped = True
+            break
         time.sleep(0.1)
 
-    if not maintenance.is_alive():
-        print("✅ Background thread stops cleanly")
-    else:
-        print("⚠️ Background thread took longer to stop")
+    assert stopped, "Background thread took longer to stop"
+    print("✅ Background thread stops cleanly")
 
 
 def test_configuration_parameters():
     """Test different configuration parameters."""
     print("⚙️ Testing configuration parameters...")
 
-    from cidstore.store import BackgroundMaintenance
-
     mock_store = MockStore()
 
     # Test custom parameters
-    maintenance = BackgroundMaintenance(
-        mock_store,
-        interval=60,  # 1 minute
-        sort_threshold=32,
-        merge_threshold=16,
+    config = MaintenanceConfig(
+        maintenance_interval=60, sort_threshold=32, merge_threshold=16
     )
+    maintenance = BackgroundMaintenance(mock_store, config)
 
     stats = maintenance.get_stats()
     assert stats["interval"] == 60
@@ -174,7 +154,7 @@ def test_configuration_parameters():
     print("✅ Custom configuration parameters working")
 
     # Test default parameters
-    maintenance_default = BackgroundMaintenance(mock_store)
+    maintenance_default = BackgroundMaintenance(mock_store, MaintenanceConfig())
     stats_default = maintenance_default.get_stats()
     assert stats_default["interval"] == 30
     assert stats_default["sort_threshold"] == 16
@@ -185,37 +165,3 @@ def test_configuration_parameters():
     # Cleanup
     maintenance.stop()
     maintenance_default.stop()
-
-
-def run_all_tests():
-    """Run all background maintenance tests."""
-    print("🚀 Testing Background Merge/Sort Implementation\n")
-    print("=" * 60)
-
-    test_background_maintenance_class()
-    print()
-
-    asyncio.run(test_maintenance_cycle_components())
-    print()
-
-    test_background_thread_lifecycle()
-    print()
-
-    test_configuration_parameters()
-    print()
-
-    print("=" * 60)
-    print("🎉 Background Merge/Sort Implementation: ✅ COMPLETE")
-    print("\n📋 Implementation Summary:")
-    print("✅ BackgroundMaintenance class with configurable parameters")
-    print("✅ Automatic background thread execution")
-    print("✅ Sort unsorted regions when threshold exceeded")
-    print("✅ Merge underfull buckets")
-    print("✅ Integration with WAL adaptive maintenance")
-    print("✅ Statistics tracking and monitoring")
-    print("✅ Clean start/stop lifecycle management")
-    print("✅ Error handling and recovery")
-
-
-if __name__ == "__main__":
-    run_all_tests()

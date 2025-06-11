@@ -11,17 +11,14 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.xfail(
-    reason="Sorted/unsorted region logic not implemented", raises=AttributeError
-)
-async def test_sorted_unsorted_region(directory):
+async def test_sorted_unsorted_region(store):
     """Insert values and check sorted/unsorted region logic per spec 3."""
     key = E.from_str("sorttest")
     for i in range(1, 11):
-        await directory.insert(key, E(i))
-    assert await directory.get_sorted_count(key) >= 0
+        await store.insert(key, E(i))
+    assert await store.get_sorted_count(key) >= 0
     # Optionally, check sorted region is sorted
-    sorted_region = await directory.get_sorted_region(key)
+    sorted_region = await store.get_sorted_region(key)
     assert sorted_region == sorted(sorted_region)
 
 
@@ -109,15 +106,15 @@ async def test_multi_value_promotion(tree):
 
 
 @pytest.mark.xfail(reason="Split/merge logic not implemented", raises=AttributeError)
-async def test_split_and_merge(directory):
+async def test_split_and_merge(store):
     """Insert enough keys to trigger a split; merging should restore invariants (Spec 3, 6)."""
-    for i in range(1, directory.SPLIT_THRESHOLD + 2):
-        await directory.insert(E.from_str(f"split{i}"), E(i))
-    new_dir, sep = await directory.split()
-    assert await directory.validate()
+    for i in range(1, store.SPLIT_THRESHOLD + 2):
+        await store.insert(E.from_str(f"split{i}"), E(i))
+    new_dir, sep = await store.split()
+    assert await store.validate()
     assert await new_dir.validate()
-    assert await directory.size() <= directory.SPLIT_THRESHOLD
-    assert await new_dir.size() <= directory.SPLIT_THRESHOLD
+    assert await store.size() <= store.SPLIT_THRESHOLD
+    assert await new_dir.size() <= store.SPLIT_THRESHOLD
 
 
 # ---
@@ -129,26 +126,26 @@ async def test_split_and_merge(directory):
 
 
 @pytest.mark.xfail(reason="compact not implemented", raises=AttributeError)
-async def test_deletion_and_gc(directory):
+async def test_deletion_and_gc(store):
     """Insert, delete, and check GC/compaction per spec 7."""
     for i in range(1, 11):
-        await directory.insert(E.from_str(f"delgc{i}"), E(i))
+        await store.insert(E.from_str(f"delgc{i}"), E(i))
     for i in range(1, 11):
-        await directory.delete(E.from_str(f"delgc{i}"))
+        await store.delete(E.from_str(f"delgc{i}"))
     for i in range(1, 11):
-        result = await directory.lookup(E.from_str(f"delgc{i}"))
+        result = await store.lookup(E.from_str(f"delgc{i}"))
         assert result == []
     for i in range(1, 11):
-        await directory.compact(E.from_str(f"delgc{i}"))
+        await store.compact(E.from_str(f"delgc{i}"))
 
 
-async def test_concurrent_insert(directory):
+async def test_concurrent_insert(store):
     """Simulate concurrent inserts and check for correct multi-value behavior (Spec 8)."""
     results = []
 
     async def writer():
-        await directory.insert(E.from_str("swmr"), E(123))
-        results.append(await directory.lookup(E.from_str("swmr")))
+        await store.insert(E.from_str("swmr"), E(123))
+        results.append(await store.lookup(E.from_str("swmr")))
 
     await asyncio.gather(writer(), writer())
     for r in results:

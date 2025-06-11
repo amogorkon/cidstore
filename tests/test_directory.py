@@ -11,29 +11,29 @@ from cidstore.keys import E
 pytestmark = pytest.mark.asyncio
 
 
-async def test_bucket_split_and_merge(bucket):
+async def test_bucket_split_and_merge(store):
     """Inserting enough entries should trigger a split and directory growth."""
-    for i in range(bucket.SPLIT_THRESHOLD + 1):
-        await bucket.insert(E.from_int(i), E(i))
-    assert bucket.global_depth >= 1
-    assert len(bucket.bucket_pointers) == 2**bucket.global_depth
-    bucket_ids = {ptr["bucket_id"] for ptr in bucket.bucket_pointers}
+    for i in range(store.SPLIT_THRESHOLD + 1):
+        await store.insert(E.from_int(i), E(i))
+    assert store.global_depth >= 1
+    assert len(store.bucket_pointers) == 2**store.global_depth
+    bucket_ids = {ptr["bucket_id"] for ptr in store.bucket_pointers}
     assert len(bucket_ids) > 1
     # Check that all directory pointers are valid and point to existing buckets
-    all_bucket_ids = {ptr["bucket_id"] for ptr in bucket.bucket_pointers}
-    for ptr in bucket.bucket_pointers:
+    all_bucket_ids = {ptr["bucket_id"] for ptr in store.bucket_pointers}
+    for ptr in store.bucket_pointers:
         assert ptr["bucket_id"] in all_bucket_ids
 
 
 @pytest.mark.xfail(reason="Sorted/unsorted region logic not implemented")
-async def test_sorted_unsorted_region_logic(bucket):
+async def test_sorted_unsorted_region_logic(store):
     """Test sorted/unsorted region logic per spec 3 (placeholder if not implemented)."""
     for i in range(10):
-        await bucket.insert(E.from_str(f"srt{i}"), E(i))
-    sorted_count = await bucket.get_sorted_count()
-    assert 0 <= sorted_count <= await bucket.size()
+        await store.insert(E.from_str(f"srt{i}"), E(i))
+    sorted_count = await store.get_sorted_count()
+    assert 0 <= sorted_count <= await store.size()
     # Optionally, check that the sorted region is actually sorted
-    sorted_region = await bucket.get_sorted_region()
+    sorted_region = await store.get_sorted_region()
     assert sorted_region == sorted(sorted_region)
 
 
