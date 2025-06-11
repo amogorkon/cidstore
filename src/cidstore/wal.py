@@ -13,7 +13,6 @@ from pathlib import Path
 
 from .constants import OP, OpType, OpVer
 from .logger import get_logger
-from .utils import assumption
 from .metrics import (
     PROMETHEUS_AVAILABLE,
     wal_buffer_capacity_bytes,
@@ -26,6 +25,7 @@ from .metrics import (
     wal_tail_position,
     wal_truncate_count,
 )
+from .utils import assumption
 
 logger = get_logger(__name__)
 
@@ -47,6 +47,7 @@ class WAL:
         self.size = size or self.DEFAULT_WAL_SIZE
         self._wal_seq: int = 0
         self.shard_id: int = 0
+        self._wal_fd = None  # Always define _wal_fd
         min_size = WAL.HEADER_SIZE + WAL.REC_SIZE
         if self.size < min_size:
             self.size = min_size

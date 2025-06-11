@@ -85,11 +85,20 @@ class E(int):
     @classmethod
     def from_entry(cls, entry: NDArray[np.void]) -> E:
         """
-        Create an E from an HDF5 row. Accepts either ('high', 'low') or ('key_high', 'key_low') or ('value_high', 'value_low') fields.
+        Create an E from an HDF5 row. Accepts either ('high', 'low'), ('key_high', 'key_low'), or ('value_high', 'value_low') fields.
         """
-        assert entry.dtype == HASH_ENTRY_DTYPE
-
-        return cls((int(entry["high"].item()) << 64) | int(entry["low"].item()))
+        # Accept both HASH_ENTRY_DTYPE and KEY_DTYPE
+        fields = entry.dtype.fields
+        if fields is not None:
+            if "high" in fields and "low" in fields:
+                return cls((int(entry["high"]) << 64) | int(entry["low"]))
+            elif "key_high" in fields and "key_low" in fields:
+                return cls((int(entry["key_high"]) << 64) | int(entry["key_low"]))
+            elif "value_high" in fields and "value_low" in fields:
+                return cls((int(entry["value_high"]) << 64) | int(entry["value_low"]))
+        raise ValueError(
+            "Input must have fields 'high'/'low', 'key_high'/'key_low', or 'value_high'/'value_low'"
+        )
 
     @classmethod
     def from_int(cls, id_: int) -> E:
@@ -113,3 +122,22 @@ class E(int):
         id_ = uuid5(NAMESPACE_DNS, value).int
         _kv_store.setdefault(id_, value)
         return cls(id_)
+
+    @classmethod
+    def from_hdf5(cls, arr: NDArray[np.void]) -> E:
+        """
+        Create an E from an HDF5-compatible array (as produced by to_hdf5).
+        Accepts a numpy structured array with fields 'high' and 'low', or a shape (2,) array.
+        """
+        assert hasattr(arr, "dtype"), "Input must have a dtype attribute (numpy array)"
+        assert arr.dtype == HASH_ENTRY_DTYPE
+        assert arr.dtype.fields is not None
+        assert "high" in arr.dtype.fields and "low" in arr.dtype.fields, (
+            "Structured array must have 'high' and 'low' fields"
+        )
+        assert hasattr(arr, "shape") and arr.shape == (2,), (
+            "Input must be a numpy array with shape (2,) if not structured"
+        )
+        high = int(arr["high"])
+        low = int(arr["low"])
+        return cls.from_int((high << 64) | low)

@@ -227,58 +227,6 @@ class CIDStore:
         self.num_buckets -= 1
         self._save_directory_metadata()
 
-    def promote_to_spill(self, key: E, new_value: E):
-        """Promote inline entry to ValueSet (spill) mode for a key."""
-        bucket_name, bucket_id = self._bucket_name_and_id(key.high, key.low)
-        buckets_group = self.hdf[BUCKS]
-        if bucket_name not in buckets_group:
-            return
-        bucket = buckets_group[bucket_name]
-        for i in range(bucket.shape[0]):
-            entry = bucket[i]
-            if entry["key_high"] == key.high and entry["key_low"] == key.low:
-                slots = list(entry["slots"])
-                values = [E(s) for s in slots if s != 0]
-                if new_value is not None:
-                    values.append(new_value)
-                sp_group = self._get_valueset_group(f)
-                ds_name = self._get_spill_ds_name(bucket_id, key)
-                if ds_name in sp_group:
-                    del sp_group[ds_name]
-                ds = sp_group.create_dataset(
-                    ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
-                )
-                ds[:] = [int(v) for v in values]
-                bucket[i]["slots"] = (0, int(ds.id.ref))
-                bucket.flush()
-                return
-
-    def demote_if_possible(self, key: E):
-        """Demote a key from spill to inline if possible (≤2 values)."""
-        bucket_name, bucket_id = self._bucket_name_and_id(key.high, key.low)
-        buckets_group = self.hdf[BUCKS]
-        if bucket_name not in buckets_group:
-            return
-        bucket = buckets_group[bucket_name]
-        for i in range(bucket.shape[0]):
-            entry = bucket[i]
-            if entry["key_high"] == key.high and entry["key_low"] == key.low:
-                slots = list(entry["slots"])
-                if slots[0] == 0 and slots[1] != 0:
-                    sp_group = self._get_valueset_group(f)
-                    ds_name = self._get_spill_ds_name(bucket_id, key)
-                    if ds_name in sp_group:
-                        ds = sp_group[ds_name]
-                        values = [E(v) for v in ds[:] if v != 0]
-                        if len(values) <= 2:
-                            new_slots = [int(v) for v in values] + [0] * (
-                                2 - len(values)
-                            )
-                            bucket[i]["slots"] = tuple(new_slots)
-                            del sp_group[ds_name]
-                            bucket.flush()
-                return
-
     def compact(self, key: E):
         """Remove tombstones (0s) from ValueSet for a key."""
         _, bucket_id = self._bucket_name_and_id(key.high, key.low)
@@ -313,32 +261,6 @@ class CIDStore:
 
     def _get_spill_ds_name(self, bucket_id, key):
         return f"sp_{bucket_id}_{key.high}_{key.low}"
-
-    def _promote_to_spill(self, bucket, entry_idx, key, new_value=None):
-        """Promote inline entry to ValueSet (spill) mode."""
-        slots = list(bucket[entry_idx]["slots"])
-        values = [E(s) for s in slots if s != 0]
-        if new_value is not None:
-            values.append(new_value)
-        bucket_id = (
-            int(bucket.attrs["bucket_id"]) if "bucket_id" in bucket.attrs else None
-        )
-        if bucket_id is None:
-            # Fallback: try to find bucket_id from name
-            bucket_id = int(bucket.name.split("_")[-1])
-        sp_group = self._get_valueset_group(self.hdf)
-        ds_name = self._get_spill_ds_name(bucket_id, key)
-        if ds_name in sp_group and isinstance(sp_group, Group):
-            if isinstance(sp_group[ds_name], Dataset):
-                del sp_group[ds_name]
-        ds = sp_group.create_dataset(
-            ds_name, shape=(len(values),), maxshape=(None,), dtype="<u8"
-        )
-        ds[:] = [int(v) for v in values]
-        # Update entry to spill mode: slots[0]=0, slots[1]=spill pointer (use HDF5 object id)
-        spill_ptr = ds.id.ref
-        bucket[entry_idx]["slots"] = (0, int(spill_ptr))
-        bucket.flush()
 
     def _demote_from_spill(self, bucket, entry_idx, key):
         """Demote ValueSet (spill) entry to inline if <=2 values remain."""

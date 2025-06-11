@@ -9,14 +9,11 @@ except ImportError:
     generate_latest = None
     CONTENT_TYPE_LATEST = "text/plain"
 
-# Global store instance (should be set by main app)
 store = None
 
-# Placeholder for JWT and IP whitelist logic
 
 app = FastAPI(title="CIDStore Control Plane", docs_url="/docs", redoc_url=None)
 
-# Simulated in-memory config and metrics (replace with real store integration)
 CONFIG = {
     "promotion_threshold": 128,
     "batch_size": 64,
@@ -41,9 +38,6 @@ async def ready():
     return "ready"
 
 
-# Prometheus metrics endpoint
-
-
 @app.get("/metrics/prometheus")
 async def prometheus_metrics():
     if generate_latest is None:
@@ -51,7 +45,6 @@ async def prometheus_metrics():
     global store
     if store is None or not hasattr(store, "metrics_collector"):
         return PlainTextResponse("metrics not available", status_code=503)
-    # Use the default registry for production, but allow tests to patch this endpoint to use a custom registry
     try:
         from prometheus_client import REGISTRY
 
@@ -59,11 +52,9 @@ async def prometheus_metrics():
             generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST
         )
     except Exception:
-        # fallback to default
         return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-# Human-readable metrics endpoint (legacy)
 @app.get("/metrics", response_class=PlainTextResponse)
 async def metrics():
     global store
@@ -78,7 +69,7 @@ API_VERSION = "1.0"
 
 def with_version(payload):
     if isinstance(payload, dict):
-        payload = dict(payload)  # copy
+        payload = dict(payload)
         payload["version"] = API_VERSION
         return payload
     return payload

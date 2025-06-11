@@ -32,12 +32,8 @@ class Storage:
         match path:
             case None:
                 self.path = io.BytesIO()
-            case str():
-                self.path = Path(path)
-            case Path():
-                self.path = path
-            case io.BytesIO():
-                self.path = path
+            case str() | Path() | io.BytesIO():
+                self.path = Path(path) if isinstance(path, str) else path
             case _:
                 raise TypeError("path must be str, Path, or io.BytesIO or None")
 
@@ -260,7 +256,6 @@ class Storage:
         value2 = slot_to_int(slots[1])
         new_value = (value_high << 64) | value_low
         values = [value1, value2, new_value]
-        # DEBUG print removed
 
         sp_group = self._get_valueset_group()
         ds_name = _get_spill_ds_name(bucket_id, key_high, key_low)
@@ -269,17 +264,13 @@ class Storage:
             del sp_group[ds_name]
 
         spill_dtype = np.dtype([("high", "<u8"), ("low", "<u8")])
-        # DEBUG print removed
+
         ds = sp_group.create_dataset(
             ds_name, shape=(len(values),), maxshape=(None,), dtype=spill_dtype
         )
         encoded = [(int(v) >> 64, int(v) & 0xFFFFFFFFFFFFFFFF) for v in values]
-        # DEBUG print removed
+
         ds[:] = encoded
-        # Immediately read back and print contents, type, shape
-        # DEBUG print removed
-        # DEBUG print removed
-        # DEBUG print removed
 
         # Store the dataset name as the spill pointer (as high/low for compatibility)
         # Use: slot1["high"] = bucket_id, slot1["low"] = key_high
@@ -297,7 +288,6 @@ class Storage:
         """Get or create the valueset group for spill datasets."""
         # Ensure /values is a group
         if "/values" in self.file and not isinstance(self.file["/values"], Group):
-            # DEBUG print removed
             del self.file["/values"]
         if "/values" not in self.file:
             self.file.create_group("/values")
@@ -305,7 +295,6 @@ class Storage:
         assumption(values_group, Group)
         # Ensure /values/sp is a group
         if "sp" in values_group and not isinstance(values_group["sp"], Group):
-            # DEBUG print removed
             del values_group["sp"]
         if "sp" not in values_group:
             values_group.create_group("sp")
@@ -332,27 +321,25 @@ class Storage:
             sp_group = self.file["/values/sp"]
             if ds_name in sp_group:
                 valueset_ds = sp_group[ds_name]
-                # DEBUG print removed
+
                 try:
                     raw = valueset_ds[:]
-                    # DEBUG print removed
+
                     import collections.abc
 
                     if not isinstance(raw, collections.abc.Iterable) or isinstance(
                         raw, (str, bytes)
                     ):
                         raw = [raw]
-                    # DEBUG print removed
-                    # DEBUG print removed
+
                     decoded = [
                         E.from_int((int(v["high"]) << 64) | int(v["low"]))
                         for v in raw
                         if int(v["high"]) != 0 or int(v["low"]) != 0
                     ]
-                    # DEBUG print removed
+
                     return decoded
                 except Exception:
-                    # DEBUG print removed
                     raise
             return []
         # Inline mode: slots are structured arrays with 'high' and 'low'
