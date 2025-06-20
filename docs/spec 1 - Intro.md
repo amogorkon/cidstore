@@ -85,7 +85,7 @@ graph TD
 
 ---
 
-## 1.10 Further Reading
+## 1.10 Overview of Specifications
 
 - [Spec 2: Data Types and Structure](spec%202%20-%20Data%20Types%20and%20Structure.md)
 - [Spec 3: Bucket Structure and Directory Management](spec%203%20-%20Bucket%20Structure%20and%20Directory%20Management.md)
