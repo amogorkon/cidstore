@@ -111,4 +111,80 @@ async def set_batch_size(request: Request, data: dict):
 async def debug_bucket(bucket_id: int, request: Request):
     internal_only(request)
     # TODO: Return real bucket metadata from store
-    return with_version({"bucket_id": bucket_id, "ecc_state": "ok", "load": 0.5})
+    # 'ecc_state' was removed from the model; include a checksum field for validation consumers instead.
+    return with_version({"bucket_id": bucket_id, "load": 0.5, "checksum": 0})
+
+
+@app.get("/debug/get")
+async def debug_get(high: int | None = None, low: int | None = None):
+    """Debug endpoint: return values for a key specified by `high` and `low` 64-bit parts.
+
+    Example: `/debug/get?high=123&low=456`
+    """
+    global store
+    if store is None:
+        return PlainTextResponse("store not initialized", status_code=503)
+    if high is None or low is None:
+        return error_response(400, "Missing high or low query parameter")
+    try:
+        from .keys import E
+
+        key = E((int(high), int(low)))
+        results = await store.get(key)
+        # Serialize results as [[high, low], ...]
+        serialized = []
+        for r in results:
+            try:
+                serialized.append([int(r.high), int(r.low)])
+            except Exception:
+                if isinstance(r, (list, tuple)):
+                    serialized.append(list(r))
+                else:
+                    serialized.append(r)
+        return with_version({"results": serialized})
+    except Exception as ex:
+        return error_response(500, str(ex))
+
+
+@app.post("/debug/delete")
+async def debug_delete(data: dict):
+    """Debug endpoint to delete a key or a specific value.
+
+    Example JSON body: {"high": 100, "low": 200} or {"high":100,"low":200,"vhigh":300,"vlow":400}
+    """
+    global store
+    if store is None:
+        return PlainTextResponse("store not initialized", status_code=503)
+    try:
+        high = int(data.get("high"))
+        low = int(data.get("low"))
+    except Exception:
+        return error_response(400, "Missing or invalid high/low")
+    vhigh = data.get("vhigh")
+    vlow = data.get("vlow")
+    try:
+        from .keys import E
+
+        key = E((high, low))
+        # Diagnostic print of incoming types
+        print(
+            "/debug/delete called with:", type(high), type(low), type(vhigh), type(vlow)
+        )
+        if vhigh is not None and vlow is not None:
+            value = E((int(vhigh), int(vlow)))
+            print("Calling store.delete_value with key=", key, "value=", value)
+            await store.delete_value(key, value)
+        else:
+            print("Calling store.delete with key=", key)
+            await store.delete(key)
+        return with_version({"result": "ok"})
+    except Exception as ex:
+        import traceback
+
+        tb = traceback.format_exc()
+        # Print diagnostic info to stdout for the demo harness to capture
+        print("/debug/delete error:")
+        print("data:", repr(data))
+        print("store:", repr(store))
+        print(tb)
+        return error_response(500, str(ex))

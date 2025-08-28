@@ -7,9 +7,7 @@ Implements:
 - (Optional) PUB/SUB for notifications
 - MessagePack serialization for all messages
 
-Requires: pyzmq[asyncio], msgpack, asyncio
-
-See: docs/spec 2 - Data Types and Structure.md for message schema
+See: spec 2 - Data Types and Structure.md for message schema
 """
 
 import asyncio
@@ -18,6 +16,8 @@ import logging
 import msgpack
 import zmq
 import zmq.asyncio
+
+from .keys import E
 
 # Placeholder import for AsyncCIDStore
 # from src.cidstore.store import AsyncCIDStore
@@ -49,37 +49,37 @@ logger = logging.getLogger(__name__)
 class AsyncZMQServer:
     async def wal_checkpoint_worker(self):
         """Periodically triggers WAL checkpointing (every 5s)."""
+        assert hasattr(self.store, "wal_checkpoint"), (
+            "Store must implement 'wal_checkpoint' method."
+        )
         while self.running:
             try:
-                if hasattr(self.store, "wal_checkpoint"):
-                    await self.store.wal_checkpoint()
+                await self.store.wal_checkpoint()
             except Exception as ex:
                 logger.error(f"[BG] WAL checkpoint error: {ex}")
             await asyncio.sleep(5)
 
     async def compaction_worker(self):
         """Periodically triggers compaction/merge/GC (every 10s)."""
+        assert hasattr(self.store, "compact"), "Store must implement 'compact' method."
         while self.running:
             try:
-                if hasattr(self.store, "compact"):
-                    await self.store.compact()
-                if hasattr(self.store, "merge"):
-                    await self.store.merge()
-                if hasattr(self.store, "gc"):
-                    await self.store.gc()
+                await self.store.compact()
+                await self.store.merge()
+                await self.store.gc()
             except Exception as ex:
                 logger.error(f"[BG] Compaction/Merge/GC error: {ex}")
             await asyncio.sleep(10)
 
     async def metrics_worker(self):
         """Periodically collects metrics and triggers auto-tuning (every 2s)."""
+        auto_tune = getattr(self.store, "auto_tune", None)
         while self.running:
             try:
-                if hasattr(self.store, "metrics"):
-                    metrics = await self.store.metrics()
-                    # Optionally, implement auto-tuning logic here
-                    if hasattr(self.store, "auto_tune"):
-                        await self.store.auto_tune(metrics)
+                metrics = await self.store.metrics()
+                # Optionally, implement auto-tuning logic here
+                if auto_tune is not None:
+                    await auto_tune(metrics)
             except Exception as ex:
                 logger.error(f"[BG] Metrics/Auto-tune error: {ex}")
             await asyncio.sleep(2)
@@ -90,96 +90,98 @@ class AsyncZMQServer:
         self.running = False
 
     async def mutation_worker(self):
-        """Single-writer: consumes mutations from PUSH socket and applies to store. Stops after 2s inactivity."""
+        """Single-writer: consumes mutations from PUSH socket and applies to store. Runs indefinitely."""
+        assert hasattr(self.store, "insert"), "Store must implement 'insert' method."
+        assert hasattr(self.store, "delete"), "Store must implement 'delete' method."
         pull_sock = self.ctx.socket(zmq.PULL)
         pull_sock.bind(PUSH_PULL_ADDR)
         while self.running:
-            try:
-                msg = await asyncio.wait_for(pull_sock.recv(), timeout=2)
-            except asyncio.TimeoutError:
-                print("[ZMQ] No mutation received for 2s, stopping server.")
-                self.running = False
-                break
+            msg = await pull_sock.recv()
             try:
                 req = msgpack.unpackb(msg, raw=False)
                 op = req.get("op_code")
                 # Validate op_code and fields
                 resp = None
                 if op == "INSERT":
-                    key = self._parse_cid(req["key"])
-                    value = self._parse_cid(req["value"])
-                    await self.store.insert(key, value)
-                    await self._publish_notification("insert", key, value)
+                    key_cid = self._parse_cid(req["key"])
+                    value_cid = self._parse_cid(req["value"])
+                    # Convert to E objects expected by the store
+                    try:
+                        key_obj = E(key_cid)
+                        value_obj = E(value_cid)
+                    except Exception:
+                        # Fallback: if already proper object, use it
+                        key_obj = key_cid
+                        value_obj = value_cid
+                    await self.store.insert(key_obj, value_obj)
+                    await self._publish_notification("insert", key_obj, value_obj)
                     resp = with_version({"result": "ok"})
                 elif op == "DELETE":
-                    key = self._parse_cid(req["key"])
-                    value = (
+                    key_cid = self._parse_cid(req["key"])
+                    value_cid = (
                         self._parse_cid(req.get("value"))
                         if req.get("value") is not None
                         else None
                     )
-                    await self.store.delete(key, value)
-                    await self._publish_notification("delete", key, value)
-                    resp = with_version({"result": "ok"})
-                elif op == "BATCH_INSERT":
-                    entries = [
-                        {
-                            "key": self._parse_cid(e["key"]),
-                            "value": self._parse_cid(e["value"]),
-                        }
-                        for e in req["entries"]
-                    ]
-                    await self.store.batch_insert(entries)
-                    await self._publish_notification("batch_insert", entries)
-                    resp = with_version({"result": "ok"})
-                elif op == "BATCH_DELETE":
-                    entries = [
-                        {
-                            "key": self._parse_cid(e["key"]),
-                            "value": self._parse_cid(e.get("value"))
-                            if e.get("value") is not None
-                            else None,
-                        }
-                        for e in req["entries"]
-                    ]
-                    await self.store.batch_delete(entries)
-                    await self._publish_notification("batch_delete", entries)
+                    try:
+                        key_obj = E(key_cid)
+                    except Exception:
+                        key_obj = key_cid
+                    if value_cid is not None:
+                        try:
+                            value_obj = E(value_cid)
+                        except Exception:
+                            value_obj = value_cid
+                        # Delete a specific value
+                        await self.store.delete_value(key_obj, value_obj)
+                    else:
+                        # Delete all values for the key
+                        await self.store.delete(key_obj)
+                    await self._publish_notification("delete", key_obj, value_cid)
                     resp = with_version({"result": "ok"})
                 else:
                     resp = error_response(400, f"Unknown mutation op_code: {op}")
-                if resp is not None:
-                    # Optionally send response on a reply socket if needed
-                    pass
             except Exception as ex:
                 logger.error(f"[ZMQ] Error processing mutation: {ex}")
                 # Optionally send error response
 
     async def read_worker(self):
-        """Handles concurrent read requests via ROUTER/DEALER. Stops after 2s inactivity."""
+        """Handles concurrent read requests via ROUTER/DEALER. Runs indefinitely."""
+        assert hasattr(self.store, "get"), "Store must implement 'get' method."
         router_sock = self.ctx.socket(zmq.ROUTER)
         router_sock.bind(ROUTER_DEALER_ADDR)
         while self.running:
-            try:
-                ident, empty, msg = await asyncio.wait_for(
-                    router_sock.recv_multipart(), timeout=2
-                )
-            except asyncio.TimeoutError:
-                print("[ZMQ] No read received for 2s, stopping server.")
-                self.running = False
-                break
+            parts = await router_sock.recv_multipart()
+            assert len(parts) == 2
+            ident, msg = parts
+
             try:
                 req = msgpack.unpackb(msg, raw=False)
                 op = req.get("op_code")
                 if op == "LOOKUP":
-                    key = self._parse_cid(req["key"])
-                    results = await self.store.lookup(key)
-                    resp = with_version({
-                        "results": [
-                            list(r) if isinstance(r, tuple) else r for r in results
-                        ]
-                    })
+                    key_cid = self._parse_cid(req["key"])
+                    try:
+                        key_obj = E(key_cid)
+                    except Exception:
+                        key_obj = key_cid
+                    results = await self.store.get(key_obj)
+                    # results is a list of E objects — serialize to [high, low]
+                    serialized = []
+                    for r in results:
+                        try:
+                            serialized.append([int(r.high), int(r.low)])
+                        except Exception:
+                            # If r is tuple/list already
+                            if isinstance(r, (list, tuple)):
+                                serialized.append(list(r))
+                            else:
+                                serialized.append(r)
+                    resp = with_version({"results": serialized})
                 elif op == "METRICS":
-                    metrics = await self.store.metrics()
+                    try:
+                        metrics = await self.store.metrics()
+                    except Exception:
+                        metrics = {}
                     resp = with_version(metrics)
                 else:
                     resp = error_response(400, "Unknown op_code")
@@ -201,7 +203,10 @@ class AsyncZMQServer:
 
     async def _publish_notification(self, event, *args):
         """Publish a notification event on the PUB socket if enabled."""
-        if hasattr(self, "pub_sock") and self.pub_sock is not None:
+        assert hasattr(self, "pub_sock"), (
+            "AsyncZMQServer must have 'pub_sock' attribute."
+        )
+        if self.pub_sock is not None:
             note = {"type": event, "args": args}
             try:
                 await self.pub_sock.send(msgpack.packb(note, use_bin_type=True))
@@ -244,15 +249,3 @@ class AsyncZMQServer:
                 t.cancel()
             await asyncio.sleep(0.1)
         self.ctx.term()
-
-
-# Example usage (for testing only)
-if __name__ == "__main__":
-
-    async def main():
-        # store = AsyncCIDStore(...)
-        store = None  # Replace with actual store
-        server = AsyncZMQServer(store)
-        await server.start()
-
-    asyncio.run(main())

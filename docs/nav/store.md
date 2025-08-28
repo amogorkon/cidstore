@@ -60,7 +60,7 @@ classDiagram
 |-------------|-------------------------------------------------------------------------------------|-----------------------------------------------------------------------------|
 | CIDStore    | `hdf: Storage`, `wal: WAL`, `dir: dict[E, int]`, `buckets: dict[str, Bucket]`       | Main store object, manages directory and buckets                            |
 | Bucket      | `entries: HashEntry[]`, `sorted_count: int`, `spill: SpillPointer?`                 | Holds hash entries, sorted/unsorted regions, and optional spill pointer     |
-| HashEntry   | `key_high: u64`, `key_low: u64`, `slots: u64[4]`, `state_mask: u8`, `version: u32`  | Maps a key to up to 4 values (inline), state mask encodes slot usage/ECC    |
+| HashEntry   | `key_high: u64`, `key_low: u64`, `slots: u64[4]`, `version: u32`  | Maps a key to up to 4 values (inline); slot usage is derived from reserved sentinel values in slots.    |
 | ValueSet    | `values: E[]`, `sorted_count: int`, `tombstone_count: int`                          | External dataset for high-cardinality keys                                  |
 | SpillPointer| `ref: u64`, `sorted_count: u32`, `checksum: u128`                                   | Points to external value-list location                                      |
 | Directory   | `buckets: Bucket[]`, `num_buckets: int`                                             | Array of buckets, stored as HDF5 datasets                                   |
@@ -108,7 +108,7 @@ classDiagram
         +key_high: u64
         +key_low: u64
         +slots: u64[4]
-        +state_mask: u8
+    # Slot occupancy is encoded by sentinel values in `slots` and validated via checksums.
         +version: u32
     }
     class ValueSet {
@@ -175,7 +175,6 @@ await store.close()
 
 - The implementation is designed for O(1) access and high concurrency.
 - All data structures are fixed-width and HDF5-backed.
-- Inline slots are used for up to 4 values per key; spill to external ValueSet for more.
-- ECC-protected state masks ensure resilience to bit-flips.
+Inline slots are used for up to 4 values per key; spill to external ValueSet for more. Slot occupancy is encoded by sentinel values in `slots` and validated via checksums and HDF5 integrity mechanisms.
 
 ---

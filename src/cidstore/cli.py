@@ -1,3 +1,11 @@
+
+from __future__ import annotations
+import argparse
+import shutil
+from pathlib import Path
+import h5py
+from zvic import constrain_this_module
+constrain_this_module()
 """
 CIDTree CLI tools for migration, backup, and recovery (Spec 3)
 
@@ -12,6 +20,8 @@ Commands:
     restore   - Restore HDF5 file from backup (with WAL replay)
 
 """
+
+from __future__ import annotations
 
 import argparse
 import shutil

@@ -38,7 +38,7 @@ flowchart TD
 | /metrics                  | GET    | Prometheus-formatted metrics.               | None/metrics   |
 | /config/promotion_threshold| GET/PUT| View/update promotion threshold.             | Admin (JWT)    |
 | /config/batch_size        | GET/PUT| Adjust auto-tuning batch parameters.         | Admin (JWT)    |
-| /debug/bucket/{id}        | GET    | Inspect bucket metadata (ECC state, load).   | Debug (IP whitelist) |
+| /debug/bucket/{id}        | GET    | Inspect bucket metadata (slot occupancy, load).   | Debug (IP whitelist) |
 
 
 #### B. Performance Isolation
@@ -359,24 +359,24 @@ sequenceDiagram
     participant HDF5
 
     Client->>Writer: Request DELETE for key/value
-    Writer->>WAL: Log deletion operation<<<<<<< SEARCH
-| Endpoint                  | Method | Description                                 | Auth Level      |
-|---------------------------|--------|---------------------------------------------|----------------|
-| /health                   | GET    | Liveness/readiness probe (Kubernetes).      | None (public)  |
-| /metrics                  | GET    | Prometheus-formatted metrics.               | None/metrics   |
-| /config/promotion_threshold| GET/PUT| View/update promotion threshold.             | Admin (JWT)    |
-| /config/batch_size        | GET/PUT| Adjust auto-tuning batch parameters.         | Admin (JWT)    |
-| /debug/bucket/{id}        | GET    | Inspect bucket metadata (ECC state, load).   | Debug (IP whitelist) |
-=======
-| Endpoint                  | Method | Description                                 | Auth Level      |
-|---------------------------|--------|---------------------------------------------|----------------|
-| /health                   | GET    | Liveness probe (Kubernetes).                | None (public)  |
-| /ready                    | GET    | Readiness probe (Kubernetes).               | None (public)  |
-| /metrics                  | GET    | Prometheus-formatted metrics.               | None/metrics   |
-| /config/promotion_threshold| GET/PUT| View/update promotion threshold.             | Admin (JWT)    |
-| /config/batch_size        | GET/PUT| Adjust auto-tuning batch parameters.         | Admin (JWT)    |
-| /debug/bucket/{id}        | GET    | Inspect bucket metadata (ECC state, load).   | Debug (IP whitelist) |
->>>>>>> REPLACE
+    Writer->>WAL: Log deletion operation
+    Writer->>DeletionLog: Record deletion details
+    WAL->>HDF5: Commit delete via CoW update
+    GC->>DeletionLog: Scan for deletion entries
+    GC->>HDF5: Cross-check bucket metadata
+    GC->>HDF5: Remove orphaned external value-lists & merge underfilled buckets
+    HDF5-->>GC: Confirm cleanup
+
+    # Control Plane Endpoints
+
+    | Endpoint                   | Method | Description                                 | Auth Level      |
+    |----------------------------|--------|---------------------------------------------|----------------|
+    | /health                    | GET    | Liveness probe (Kubernetes).                | None (public)  |
+    | /ready                     | GET    | Readiness probe (Kubernetes).               | None (public)  |
+    | /metrics                   | GET    | Prometheus-formatted metrics.               | None/metrics   |
+    | /config/promotion_threshold| GET/PUT| View/update promotion threshold.            | Admin (JWT)    |
+    | /config/batch_size         | GET/PUT| Adjust auto-tuning batch parameters.       | Admin (JWT)    |
+    | /debug/bucket/{id}         | GET    | Inspect bucket metadata (slot occupancy, load).  | Debug (IP whitelist) |
 
     Writer->>DeletionLog: Record deletion details
     WAL->>HDF5: Commit delete via CoW update

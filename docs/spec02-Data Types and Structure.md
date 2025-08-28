@@ -73,7 +73,7 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 | Component         | Structure / dtype fields                                      | Size   | Description                                                      |
 |-------------------|--------------------------------------------------------------|--------|------------------------------------------------------------------|
 | Key               | `[high: u64, low: u64]`                                      | 16B    | 128-bit immutable identifier (SHA3 or composite hash)            |
-| Hash Entry        | `[key_high: u64, key_low: u64, slots: [E, E] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. No state mask. |
+| Hash Entry        | `[key_high: u64, key_low: u64, slots: [E, E] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. |
 | Value Set         | `[E[] values, sorted_count: u32, tombstone_count: u32]`    | Var    | External dataset for high-cardinality keys; tombstone for GC     |
 | Spill Pointer     | `[ref: u64]`                                                 | 8B     | HDF5 object reference to external ValueSet (spill mode)          |
 | Deletion Record   | `[key_high: u64, key_low: u64, value_group: S8, timestamp: u64]` | 32B    | Tracks obsolete keys for GC; timestamp is Unix ns                |
@@ -215,3 +215,67 @@ classDiagram
 | low   | uint64  | Low 64 bits of E  |
 
 ---
+
+## 2.6 Slot Encoding & Sentinels
+
+This section gives a precise, implementation-friendly contract for how the two inline slots in a `HashEntry` are encoded, how to detect spill mode (external ValueSet), and the sentinel values used to represent empty slots and pointer encodings.
+
+Overview
+- Each `HashEntry` contains two slot fields: `slot0` and `slot1`. Each slot is an `E` value (two u64s: `high`, `low`) when used for inline values. In spill mode the slots are interpreted differently (first slot signals spill, second encodes a pointer).
+- There are two logical modes for an entry:
+  - Inline mode: one or two value `E`s stored directly in `slot0`/`slot1` (unused slots set to an `EMPTY_SLOT` sentinel).
+  - Spill mode: `slot0` is a dedicated indicator value and `slot1` contains an encoded `SpillPointer` (HDF5 object reference).
+
+Reserved sentinel values and encoding rules
+- `EMPTY_SLOT` (reserved): `E(high=0xFFFFFFFFFFFFFFFF, low=0xFFFFFFFFFFFFFFFF)`
+  - Meaning: this inline slot is unused.
+  - Use: when an entry has fewer than two inline values, the unused slot(s) MUST be set to `EMPTY_SLOT`.
+
+- `SPILL_INDICATOR` (reserved): `E(high=0x0, low=0x0)`
+  - Meaning: the entry is in spill mode and does not store inline CIDs in slots.
+  - Use: when `slot0 == SPILL_INDICATOR`, the entry is considered to be in spill mode and `slot1` encodes the external `ValueSet` reference.
+
+- `SPILL_POINTER` encoding in `slot1` (when `SPILL_INDICATOR` is present in `slot0`):
+  - `slot1.high == 0xFFFFFFFFFFFFFFFF` (tag value) and `slot1.low` holds the 64-bit HDF5 object reference (unsigned) that points to the external `ValueSet` dataset.
+  - The tag in `slot1.high` disambiguates the 128-bit `slot1` contents as a pointer rather than an inline `E` value.
+
+Validation
+- This implementation intentionally keeps the on-disk encoding simple by *rejecting* ambiguous `E` values before they reach the slot-encoding logic.
+- In particular, `E == 0` (both `high == 0x0` and `low == 0x0`) is RESERVED as the `SPILL_INDICATOR` sentinel and therefore *cannot* be a valid inline value. Writers MUST reject any candidate `E` equal to zero before attempting to store it in a `HashEntry` (input validation at a higher layer).
+- Because `E == 0` is rejected upstream, there is no need for complex collision or special-case handling for zero-valued `E` at the slot-encoding layer. Implementations MAY assert this invariant when decoding entries for performance and clarity.
+
+Checksum & Validation
+- The `HashEntry` checksum covers the canonical representation of the key and the slots (or the spill pointer when in spill mode). On every read the checksum MUST be validated. If the checksum fails, recovery should consult the WAL and higher-level validation logic to repair or mark the entry for GC.
+
+Helper predicates (pseudocode)
+
+```python
+EMPTY_HIGH = 0xFFFFFFFFFFFFFFFF
+EMPTY_LOW  = 0xFFFFFFFFFFFFFFFF
+SPILL_HIGH = 0x0
+SPILL_LOW  = 0x0
+PTR_TAG_HIGH = 0xFFFFFFFFFFFFFFFF
+
+def validate_E(e):
+    # E must never be zero: zero is reserved as SPILL_INDICATOR.
+    assert not (e.high == SPILL_HIGH and e.low == SPILL_LOW)
+
+def is_spill(entry):
+    return entry.slot0.high == SPILL_HIGH and entry.slot0.low == SPILL_LOW
+
+def is_empty_slot(slot):
+    return slot.high == EMPTY_HIGH and slot.low == EMPTY_LOW
+
+def get_spill_ref(entry):
+    assert is_spill(entry)
+    assert entry.slot1.high == PTR_TAG_HIGH
+    return entry.slot1.low  # 64-bit HDF5 object reference
+```
+
+Atomicity and WAL
+- All transitions between inline and spill modes (promotion/demotion) MUST be WAL-logged and applied using the CoW metadata update pattern described elsewhere in these specs.
+- When promoting a key to spill mode, the writer must: write the `ValueSet`, update `slot1` with the pointer and `slot0` with `SPILL_INDICATOR`, write WAL records for the operation, and atomically swap metadata (HDF5 attributes/directory update).
+
+Notes and rationale
+- The sentinel/tag approach keeps the on-disk `HashEntry` fixed-width and O(1) to inspect: a reader can decide inline vs spill by inspecting two fast machine-word comparisons.
+- The exact tag and sentinel values above are fixed by this spec to ensure interoperability across implementations. If future designs change the sentinel scheme, bump the `format_version` in `/config/format_version` and provide migration tooling.

@@ -47,7 +47,11 @@ async def test_bucket_structure_and_types(store):
     assert "slots" in entry
     assert "checksum" in entry
     assert isinstance(entry["key_high"], int)
-    assert entry["key_high"] == 1
+    # The inserted value was `E(1 << 64)`, so verify the first inline slot stores
+    # a value with high==1 (value.high == 1). Older test asserted key_high==1
+    # which was incorrect because the key is a hash of the string; check slots.
+    assert isinstance(entry["slots"], list)
+    assert entry["slots"][0][0] == 1
 
 
 async def test_directory_entry_structure(directory):

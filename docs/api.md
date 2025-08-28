@@ -39,7 +39,7 @@ class ValueSet:
     ValueSet: Multi-value key handler for CIDStore buckets.
 
     - Stores up to MULTI_VALUE_THRESHOLD values inline, then spills to external HDF5 dataset.
-    - Uses ECC-protected state mask for inline/spill/tombstone state (Spec 5).
+    - Uses sentinel values and external ValueSet pointers for inline/spill/tombstone state (Spec 5).
     - Supports promotion, demotion, compaction, and tombstone tracking.
     - All mutating operations are WAL-logged if WAL is provided.
     """

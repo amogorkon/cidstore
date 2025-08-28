@@ -1,9 +1,9 @@
+from __future__ import annotations
+
 """
 The JACK hash alphabet.
 For details see https://pypi.org/project/jackhash
 """
-
-from .utils import assumption
 
 # korean characters: https://github.com/arcsecw/wubi/blob/master/wubi/cw.py
 # chinese characters: https://github.com/tsroten/zhon/blob/develop/zhon/cedict/all.py
@@ -40629,16 +40629,14 @@ class AlphabetAccess:
     global ascii_characters
     global chinese_characters
     global korean_characters
-    alphabet = sorted(
-        list(set(ascii_characters + chinese_characters + korean_characters))
-    )
+    alphabet = sorted(set(ascii_characters + chinese_characters + korean_characters))
     reverse_alphabet = {c: i for i, c in enumerate(alphabet)}
     del ascii_characters
     del chinese_characters
     del korean_characters
 
 
-def represent_num_as_base(num, base):
+def represent_num_as_base(num: int, base: int) -> list[int]:
     """
     Convert a non-negative integer to a list of digits in the given base.
 
@@ -40658,7 +40656,7 @@ def represent_num_as_base(num, base):
     return digits[::-1]
 
 
-def hexdigest_as_JACK(string):
+def hexdigest_as_JACK(string: str) -> str:
     """
     Encode a hexadecimal string as a JACK string using the custom alphabet.
 
@@ -40668,14 +40666,13 @@ def hexdigest_as_JACK(string):
     Returns:
         str: The JACK-encoded string.
     """
-    assert assumption(string, str)
     return "".join(
         AlphabetAccess.alphabet[c]
         for c in represent_num_as_base(int(string, 16), len(AlphabetAccess.alphabet))
     )
 
 
-def JACK_as_num(string: str):
+def JACK_as_num(string: str) -> int:
     """
     Decode a JACK string back to an integer.
 
@@ -40685,7 +40682,6 @@ def JACK_as_num(string: str):
     Returns:
         int: The decoded integer value.
     """
-    assert assumption(string, str)
     string = "".join(string.split())
     return sum(
         len(AlphabetAccess.reverse_alphabet) ** i * AlphabetAccess.reverse_alphabet[x]
@@ -40693,7 +40689,7 @@ def JACK_as_num(string: str):
     )
 
 
-def num_as_hexdigest(num):
+def num_as_hexdigest(num: int) -> str:
     """
     Convert an integer to a zero-padded 64-character hexadecimal string.
 
@@ -40703,11 +40699,10 @@ def num_as_hexdigest(num):
     Returns:
         str: The zero-padded hexadecimal string.
     """
-    assert assumption(num, int)
     return str.rjust(hex(num)[2:], 64, "0")
 
 
-def is_JACK(H):
+def is_JACK(H: str) -> bool:
     """
     Check if a string is a valid JACK-encoded string (all characters in the custom alphabet).
 
@@ -40717,5 +40712,4 @@ def is_JACK(H):
     Returns:
         bool: True if the string is JACK-encoded, False otherwise.
     """
-    assert assumption(H, str)
     return all(c in AlphabetAccess.alphabet for c in H)

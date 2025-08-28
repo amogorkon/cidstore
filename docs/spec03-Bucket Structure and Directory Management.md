@@ -244,7 +244,6 @@ Operators can opt out of automatic in-place migration and use the CLI tool inste
 
 ### 3.10.6 Migration Examples
 
-- **Adding state_mask ECC:** Upgrade all index entries to 8-bit SECDED code and bump `format_version`.
 - **Sharding Buckets:** Move all buckets under `/hash/shards/shard0000/`, update pointers, and bump `format_version`.
 
 
@@ -312,7 +311,7 @@ To accommodate the evolution of deployments from small/medium to large scale, th
 #### Preparation Phase
 
 - **Migration Tool/Process:** Develop a migration tool (or integrate a scheduled maintenance process) that reads bucket metadata from HDF5 attributes and writes it into a newly created, dedicated directory dataset.
-- **Schema Definition:** The dedicated dataset is defined using HDF5 compound types, with fields such as bucket ID, metadata pointers (e.g., spill pointers, ECC state mask), and versioning data.
+- **Schema Definition:** The dedicated dataset is defined using HDF5 compound types, with fields such as bucket ID, metadata pointers (e.g., spill pointers), and versioning data. See `Spec 2: Data Types and Structure` for the authoritative entry layout and slot handling.
 - **Backup and Consistency:** Ensure that a consistent snapshot is taken—either by temporarily locking updates or by using multi-version coordination—to avoid discrepancies during migration.
 
 #### Migration Execution
@@ -338,7 +337,7 @@ This migration path ensures a smooth transition from an attribute-based director
 - It uses a controlled, batch-oriented migration process with proper validation to maintain consistency.
 - It enables the system to scale seamlessly without interrupting service, while providing a clear rollback/cleanup plan.
 
-**For details on the ECC-protected state mask, see [Spec 5: Multi-Value Keys](spec%205%20-%20Multi-Value%20Keys.md#ecc-protected-state-mask--slot-layout).**
+See `Spec 2: Data Types and Structure` for the authoritative on-disk schema and entry layout; do not rely on deprecated or removed fields.
 
 **Sharded Directory:**
 - Partition the directory into shards, each as a separate HDF5 group or dataset, with a higher-level directory mapping bucket ranges to shards.

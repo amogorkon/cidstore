@@ -1,5 +1,16 @@
+
+from __future__ import annotations
+import asyncio
+import io
+from pathlib import Path
+from time import time
+import numpy as np
+from h5py import Dataset, File, Group, version
+from zvic import constrain_this_module
+constrain_this_module()
 """storage.py - HDF5 storage manager and raw hooks for CIDTree"""
 
+import asyncio
 import io
 from pathlib import Path
 from time import time
@@ -43,13 +54,11 @@ class Storage:
 
         mode = getattr(self.file, "mode", "unknown")
         swmr = getattr(self.file, "swmr_mode", False)
-        assert set(self.file.keys()) == {
-            "buckets",
-            "config",
-            "nodes",
-            "values",
-            "root",
-        }, "HDF5 file layout is invalid"
+        # Ensure required groups exist; allow additional metadata/groups to be present
+        keys = set(self.file.keys())
+        required = {"buckets", "config", "nodes", "values", "root"}
+        missing = required - keys
+        assert not missing, f"HDF5 file layout is invalid, missing groups: {missing}"
         path_str = None if isinstance(self.path, io.BytesIO) else str(self.path)
         logger.info(f"Storage initialized:, {path_str=}, {mode=}, {swmr=}")
 
@@ -138,7 +147,9 @@ class Storage:
         Supports both file paths and in-memory io.BytesIO buffers.
         """
         try:
-            self.file = File(self.path, "w", libver="latest")
+            # When given a path, open in 'a' (append) mode to avoid truncation of existing files.
+            mode = "a" if not isinstance(self.path, io.BytesIO) else "w"
+            self.file = File(self.path, mode, libver="latest")
             self._ensure_core_groups()
             return self.file
         except (OSError, RuntimeError) as e:
@@ -164,6 +175,43 @@ class Storage:
         except (OSError, RuntimeError) as e:
             raise RuntimeError(f"Failed to close HDF5 file: {e}") from e
 
+    # Support context manager used in some tests
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    async def apply_delete(self, op: OP, bucket_name: str):
+        """Apply a delete operation from the WAL to the storage (async wrapper)."""
+
+        # Delegate to synchronous delete logic if necessary
+        # For now, mirror apply_insert behavior by calling delete logic synchronously
+        def _do_delete():
+            # Find bucket and mark deletions as zeros (tombstones)
+            bucket_group = self.file[BUCKS]
+            assert assumption(bucket_group, Group)
+            if bucket_name not in bucket_group:
+                return
+            bucket_ds = bucket_group[bucket_name]
+            assert assumption(bucket_ds, Dataset)
+            total = bucket_ds.shape[0]
+            for i in range(total):
+                entry = bucket_ds[i]
+                if entry["key_high"] == op.k_high and entry["key_low"] == op.k_low:
+                    # zero out slots
+                    entry["slots"][0]["high"] = 0
+                    entry["slots"][0]["low"] = 0
+                    entry["slots"][1]["high"] = 0
+                    entry["slots"][1]["low"] = 0
+                    bucket_ds[i] = entry
+                    break
+
+        await asyncio.to_thread(_do_delete)
+
     @property
     def buckets(self):
         """
@@ -176,9 +224,9 @@ class Storage:
     async def apply_insert(self, op: OP, bucket_name: str) -> Dataset:
         """Apply an insert operation from the WAL to the storage."""
         bucket_group = self.file[BUCKS]
-        assumption(bucket_group, Group)
+        assert assumption(bucket_group, Group)
         bucket_ds = bucket_group[bucket_name]
-        assumption(bucket_ds, Dataset)
+        assert assumption(bucket_ds, Dataset)
 
         total = bucket_ds.shape[0]
         entry_idx = None
@@ -199,22 +247,20 @@ class Storage:
         slot0, slot1 = entry["slots"]
 
         match any(slot0), any(slot1):
-            case False, False:  # Inline mode, both slots empty, new entry
+            case (False, False):  # Inline mode, both slots empty, new entry
                 entry["slots"][0]["high"] = op.v_high
                 entry["slots"][0]["low"] = op.v_low
                 bucket_ds.resize((total + 1,))
                 bucket_ds[total] = entry
                 bucket_ds.attrs["entry_count"] = total + 1
 
-            case True, False:  # Inline mode, first slot used, put in second slot
+            case (True, False):  # Inline mode, first slot used, put in second slot
                 entry["slots"][1]["high"] = op.v_high
                 entry["slots"][1]["low"] = op.v_low
                 bucket_ds[entry_idx] = entry
 
-            case True, True:  # Inline mode, both slots used, must promote to spill
-                bucket_id = int(
-                    bucket_name.split("_")[1]
-                )  # Parse bucket_id from bucket_name
+            case (True, True):  # Inline mode, both slots used, must promote to spill
+                bucket_id = int(bucket_name.split("_")[-1])
                 assert entry_idx is not None, "Entry index must be set"
                 # Re-fetch the entry from the dataset to ensure it is up-to-date
                 entry = bucket_ds[entry_idx]
@@ -229,8 +275,9 @@ class Storage:
                     op.v_low,
                 )
 
-            case False, True:
+            case (False, True):
                 await self.apply_insert_spill(entry, op.v_high, op.v_low)
+
         assert assumption(bucket_ds, Dataset)
         return bucket_ds  # type: ignore
 
@@ -292,7 +339,7 @@ class Storage:
         if "/values" not in self.file:
             self.file.create_group("/values")
         values_group = self.file["/values"]
-        assumption(values_group, Group)
+        assert assumption(values_group, Group)
         # Ensure /values/sp is a group
         if "sp" in values_group and not isinstance(values_group["sp"], Group):
             del values_group["sp"]

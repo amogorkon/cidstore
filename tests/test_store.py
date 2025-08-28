@@ -1,8 +1,12 @@
 import asyncio
 
 import pytest
+from cidstore.storage import Storage
 
 from cidstore.keys import E
+from pathlib import Path
+from cidstore.wal import WAL
+from cidstore.store import CIDStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -16,9 +20,9 @@ async def test_sorted_unsorted_region(store):
     key = E.from_str("sorttest")
     for i in range(1, 11):
         await store.insert(key, E(i))
-    assert await store.get_sorted_count(key) >= 0
+    assert store.get_sorted_count(key) >= 0
     # Optionally, check sorted region is sorted
-    sorted_region = await store.get_sorted_region(key)
+    sorted_region = store.get_sorted_region(key)
     assert sorted_region == sorted(sorted_region)
 
 
@@ -45,31 +49,6 @@ async def test_spill_pointer_and_large_valueset(tree):
     for i in range(1, 1001):
         await tree.insert(key, E(i))
     assert await tree.has_spill_pointer(key)
-
-
-@pytest.mark.xfail(reason="get_state_mask not implemented", raises=AttributeError)
-async def test_state_mask_ecc(tree):
-    key = E.from_str("ecc")
-    for i in range(1, 5):
-        await tree.insert(key, E(i))
-    await tree.delete(key)
-    mask = await tree.get_state_mask(key)
-    assert isinstance(mask, int)
-    # Optionally, inject bitflip and check correction
-    await tree.check_and_correct_state_mask(key)
-    # Spec 2: ECC-protected state mask must correct single-bit errors and detect double-bit errors
-    mask = await tree.get_state_mask(key)
-    orig_mask = mask
-    for bit in range(8):
-        corrupted = orig_mask ^ (1 << bit)
-        await tree.set_state_mask(key, corrupted)
-        await tree.check_and_correct_state_mask(key)
-        assert await tree.get_state_mask(key) == orig_mask
-    # Inject double-bit error and check detection (should not correct)
-    corrupted = orig_mask ^ 0b11
-    await tree.set_state_mask(key, corrupted)
-    await tree.check_and_correct_state_mask(key)
-    assert await tree.get_state_mask(key) != orig_mask
 
 
 async def test_btree_initialization(tree):

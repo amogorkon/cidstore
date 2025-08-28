@@ -1,4 +1,4 @@
-# 1. Introduction
+# CIDStore Specification Overview
 
 | Feature                | Target/Description                       |
 |------------------------|------------------------------------------|
