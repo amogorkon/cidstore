@@ -87,3 +87,17 @@ Refer to the documentation in the `docs/` folder for detailed usage instructions
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Versioning Scheme
+
+We use a CalVer versioning scheme: `YYYY.0W[.patchN/devN/rcN]`, where:
+- `YYYY` is the year
+- `0W` is the zero-padded ISO week number
+- Optional `.patchN`, `.devN`, `.rcN` for patches, dev, or release candidates. Normally it's just the number of releases in that week.
+
+For example, `2025.26` corresponds to week 26 of 2025. This mirrors the structure of our Scrum logs (see `/docs/scrum/README.md`).
+
+# Office Hours
+You can also contact me one-on-one! Check my [office hours](https://calendly.com/amogorkon/officehours) to set up a meeting :-)
+
+If you have questions also feel free to use the github [Issues](https://github.com/amogorkon/cidstore/issues) or the [Discussions](https://github.com/amogorkon/cidstore/discussions).
