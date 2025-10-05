@@ -16,6 +16,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+# Python 3.13+ feature: copy.replace() for immutable dataclass updates
+try:
+    from copy import replace  # Python 3.13+
+except ImportError:
+    # Fallback for Python < 3.13: use dataclasses.replace
+    from dataclasses import replace
+
 from . import wal_analyzer
 from .constants import DELETION_RECORD_DTYPE, OpType
 from .utils import assumption
@@ -36,7 +43,12 @@ class WALInsight:
 
 @dataclass
 class MaintenanceConfig:
-    """Configuration for background maintenance operations."""
+    """Configuration for background maintenance operations.
+
+    Python 3.13 Note: This dataclass supports copy.replace() for creating
+    modified configurations without mutation:
+        new_config = replace(old_config, gc_interval=120)
+    """
 
     # GC settings
     gc_interval: int = 60  # seconds
@@ -58,6 +70,19 @@ class MaintenanceConfig:
         10  # seconds to wait for threads to shut down gracefully
     )
     thread_timeout: float = 1.0  # seconds - default timeout for all threads
+
+    def with_testing_timeouts(self) -> "MaintenanceConfig":
+        """Create a new config with shorter timeouts for testing.
+
+        Uses Python 3.13's copy.replace() for efficient immutable updates.
+        """
+        return replace(
+            self,
+            thread_timeout=0.5,
+            gc_interval=5,
+            maintenance_interval=5,
+            wal_analysis_interval=10,
+        )
 
 
 class DeletionLog:

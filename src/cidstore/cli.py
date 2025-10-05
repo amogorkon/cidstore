@@ -11,6 +11,10 @@ Commands:
     backup    - Create a backup of the HDF5 file (with WAL flush)
     restore   - Restore HDF5 file from backup (with WAL replay)
 
+Python 3.13 Features:
+    - Uses improved argparse with deprecation support
+    - Benefits from enhanced error messages and tracebacks
+    - Compatible with free-threaded CPython (PEP 703)
 """
 
 import argparse

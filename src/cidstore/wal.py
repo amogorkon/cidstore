@@ -447,10 +447,22 @@ class WAL:
                     self._wal_fd = None
 
     def __del__(self):
+        """Cleanup on deletion.
+
+        Python 3.13: Handles PythonFinalizationError gracefully during interpreter shutdown.
+        """
         from contextlib import suppress
 
-        with suppress(Exception):
-            self.close()
+        try:
+            # PythonFinalizationError is new in Python 3.13
+            from builtins import PythonFinalizationError
+
+            with suppress(Exception, PythonFinalizationError):
+                self.close()
+        except ImportError:
+            # Python < 3.13
+            with suppress(Exception):
+                self.close()
 
     def _next_hybrid_time(self):
         """

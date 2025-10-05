@@ -1850,7 +1850,10 @@ class CIDStore:
         return ds_name in sp_group
 
     def close(self) -> None:
-        """Close underlying HDF5 and WAL resources."""
+        """Close underlying HDF5 and WAL resources.
+
+        Python 3.13: Safe to call during finalization - won't raise PythonFinalizationError.
+        """
         if hasattr(self, "hdf") and hasattr(self.hdf, "close"):
             self.hdf.close()
         if hasattr(self, "wal") and hasattr(self.wal, "close"):
