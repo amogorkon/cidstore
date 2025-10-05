@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 PROMETHEUS_AVAILABLE = False
 
 
 try:
-    from prometheus_client import CollectorRegistry, Counter, Gauge
+    from prometheus_client import Counter, Gauge
 
     PROMETHEUS_AVAILABLE = True
 
@@ -114,6 +114,21 @@ def get_wal_prometheus_metrics(registry=None) -> list[Any]:
         metrics = create_wal_metrics(registry=registry)
         return list(metrics.values())
     return []
+
+
+# Some static analyzers confuse Counter/Gauge types and report attribute
+# errors when code calls `.set()` on an exported metric. Cast the exported
+# metric objects to `Any` so callers can use `.set()`/`.inc()` without
+# spurious type errors in editors.
+wal_records_appended = cast(Any, wal_records_appended)
+wal_replay_count = cast(Any, wal_replay_count)
+wal_crc_failures = cast(Any, wal_crc_failures)
+wal_truncate_count = cast(Any, wal_truncate_count)
+wal_error_count = cast(Any, wal_error_count)
+wal_head_position = cast(Any, wal_head_position)
+wal_tail_position = cast(Any, wal_tail_position)
+wal_buffer_capacity_bytes = cast(Any, wal_buffer_capacity_bytes)
+wal_records_in_buffer = cast(Any, wal_records_in_buffer)
 
 
 class MetricsCollector:

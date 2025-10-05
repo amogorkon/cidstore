@@ -47,31 +47,6 @@ async def test_spill_pointer_and_large_valueset(tree):
     assert await tree.has_spill_pointer(key)
 
 
-@pytest.mark.xfail(reason="get_state_mask not implemented", raises=AttributeError)
-async def test_state_mask_ecc(tree):
-    key = E.from_str("ecc")
-    for i in range(1, 5):
-        await tree.insert(key, E(i))
-    await tree.delete(key)
-    mask = await tree.get_state_mask(key)
-    assert isinstance(mask, int)
-    # Optionally, inject bitflip and check correction
-    await tree.check_and_correct_state_mask(key)
-    # Spec 2: ECC-protected state mask must correct single-bit errors and detect double-bit errors
-    mask = await tree.get_state_mask(key)
-    orig_mask = mask
-    for bit in range(8):
-        corrupted = orig_mask ^ (1 << bit)
-        await tree.set_state_mask(key, corrupted)
-        await tree.check_and_correct_state_mask(key)
-        assert await tree.get_state_mask(key) == orig_mask
-    # Inject double-bit error and check detection (should not correct)
-    corrupted = orig_mask ^ 0b11
-    await tree.set_state_mask(key, corrupted)
-    await tree.check_and_correct_state_mask(key)
-    assert await tree.get_state_mask(key) != orig_mask
-
-
 async def test_btree_initialization(tree):
     assert tree is not None
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import namedtuple
+from typing import NamedTuple, Optional
 from enum import Enum
 
 import numpy as np
@@ -114,19 +114,22 @@ class OpVer(Enum):
         return cls(value)
 
 
-OP = namedtuple(
-    "OP",
-    [
-        "version",  # OpVer
-        "optype",  # OpType
-        "reserved",  # reserved field, currently unused
-        "nanos",  # int, nanoseconds since epoch
-        "seq",  # int, sequence number for this shard
-        "shard_id",  # int, shard ID (0 for non-sharded WALs)
-        "k_high",  # int, high part of key
-        "k_low",  # int, low part of key
-        "v_high",  # int, high part of value (if applicable)
-        "v_low",  # int, low part of value (if applicable)
-        "checksum",  # int, CRC32 checksum of the record core
-    ],
-)
+class OP(NamedTuple):
+    """Typed representation of a WAL operation record.
+
+    Fields mirror the namedtuple previously used. `v_high` and `v_low`
+    are Optional to allow representing delete/txn records where a value
+    may not be present.
+    """
+
+    version: int  # OpVer
+    optype: int  # OpType
+    reserved: int  # currently unused
+    nanos: int  # int, nanoseconds since epoch
+    seq: int  # int, sequence number for this shard
+    shard_id: int  # int, shard ID (0 for non-sharded WALs)
+    k_high: int  # int, high part of key
+    k_low: int  # int, low part of key
+    v_high: Optional[int]  # int | None, high part of value
+    v_low: Optional[int]  # int | None, low part of value
+    checksum: int  # int, CRC32 checksum of the record core

@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+try:
+    # zvic is an optional development-time tool; allow missing imports in CI.
+    from zvic import constrain_this_module  # type: ignore[import]
+except Exception:
+    # zvic is optional; provide a no-op fallback when it's not installed
+    def constrain_this_module():
+        return None
+
+
 import time
+from copy import replace
 from dataclasses import dataclass
 from functools import reduce
 from operator import add

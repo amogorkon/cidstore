@@ -1,0 +1,13 @@
+{
+  "typeCheckingMode": "basic",
+  "reportUnknownMemberType": false,
+  "reportGeneralTypeIssues": false,
+  "reportOptionalMemberAccess": false,
+  "exclude": [
+    "tests",
+    "__pycache__",
+    "docs",
+    "k8s",
+    "llm_playground"
+  ]
+}

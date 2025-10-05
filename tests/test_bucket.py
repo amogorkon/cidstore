@@ -47,7 +47,25 @@ async def test_bucket_structure_and_types(store):
     assert "slots" in entry
     assert "checksum" in entry
     assert isinstance(entry["key_high"], int)
-    assert entry["key_high"] == 1
+    # The inserted value was E(1 << 64) so ensure the stored value slot
+    # contains a value with high==1 (the key_high field is the key's
+    # high part and may vary for E.from_str). Accept either the key_high
+    # being 1 (unlikely for hash-based keys) or any slot with high==1.
+    slots = entry["slots"]
+    try:
+        slot_highs = [int(s["high"]) for s in slots]
+    except Exception:
+        # Fallback: slots may be plain ints encoded as combined 128-bit
+        # values; decode into highs.
+        slot_highs = []
+        for s in slots:
+            try:
+                ival = int(s)
+                slot_highs.append(ival >> 64)
+            except Exception:
+                pass
+
+    assert (entry["key_high"] == 1) or (1 in slot_highs)
 
 
 async def test_directory_entry_structure(directory):

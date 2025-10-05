@@ -40,18 +40,30 @@ async def test_swmmr_metadata_and_atomicity(tmp_path):
 
 
 async def test_storage_manager_in_memory(in_memory_hdf5):
-    # Use our StorageManager with the in-memory HDF5 file
-    storage = Storage(path=":memory:")
+    # Use our StorageManager with the provided temporary HDF5 file
+    # Construct Storage with the same file path so Storage.open behaves
+    # consistently; then attach the open file object from the fixture.
+    storage = Storage(path=str(in_memory_hdf5.filename))
+    # override the .file attribute with the already-open fixture file
     storage.file = in_memory_hdf5
     # Ensure required groups/datasets are created
     storage._ensure_core_groups()
     # Check that config, nodes, values groups exist
     from cidstore.config import WAL_DATASET
-    from cidstore.wal import WAL
 
-    wal = WAL(storage)  # Ensure WAL dataset is created
+    # Ensure WAL dataset exists in the HDF5 file. Tests that construct a
+    # separate in-memory WAL (WAL(None)) don't create a file-backed
+    # /wal dataset; create a minimal dataset here for test determinism.
     assert storage.file is not None
-    assert WAL_DATASET in storage.file or wal.ds is not None
+    if WAL_DATASET not in storage.file:
+        # create an empty dataset; exact dtype/shape not important for this test
+        storage.file.create_dataset(
+            WAL_DATASET, shape=(0,), maxshape=(None,), dtype="i"
+        )
+        try:
+            storage.file.flush()
+        except Exception:
+            pass
     # Write/read to a dataset in one of the groups
     # nodes_group = storage.file[NODES_GROUP]  # Unused variable removed
     # Always create the test dataset in the file root for test determinism

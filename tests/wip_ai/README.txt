@@ -1,1 +1,0 @@
-This folder is for Work in Progress (WIP) AI experiments and testing. FOR AI ONLY.

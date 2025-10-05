@@ -84,6 +84,27 @@ pip install -r requirements.txt
 
 Refer to the documentation in the `docs/` folder for detailed usage instructions and examples.
 
+## Development setup
+
+This repository contains convenience scripts to create a development virtual environment,
+install the package in editable mode, and pin a resolved development dependency list.
+
+PowerShell (Windows):
+
+```powershell
+.\scripts\setup_dev.ps1
+```
+
+POSIX (Linux/macOS):
+
+```bash
+./scripts/setup_dev.sh
+```
+
+Both scripts will create a `.venv` folder (if missing), install the package in editable
+mode, install `pytest` (and minimal dev deps), and write `requirements-dev.txt` with the
+resolved package versions. After running them you can run `pytest` from the repo root.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

@@ -92,7 +92,7 @@ async def test_multivalue_edge_cases(directory):
 
 
 async def test_multivalue_get_entry_fields(directory):
-    """get_entry should return all canonical fields for a multi-value key (no state_mask)."""
+    """get_entry should return all canonical fields for a multi-value key."""
     from cidstore.keys import E
 
     key = E.from_str("entryfields")
