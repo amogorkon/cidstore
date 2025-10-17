@@ -29,6 +29,7 @@ from .metrics import init_metrics_and_autotune
 from .storage import Storage
 from .utils import assumption
 from .wal import WAL
+from .predicates import PredicateRegistry
 
 logger = get_logger(__name__)
 
@@ -106,6 +107,10 @@ class CIDStore:
         self._init_deletion_log_and_gc(start=not testing)
         if not testing:
             init_metrics_and_autotune(self)
+
+        # Initialize predicate registry for specialized data structures
+        # Tests can register specialized predicates via this object.
+        self.predicate_registry = PredicateRegistry()
 
         # Keep the public CIDStore API purely asynchronous. The test
         # harness (`conftest.py`'s `SyncCIDStoreWrapper`) is responsible
@@ -1152,120 +1157,103 @@ class CIDStore:
                 except Exception:
                     # ignore lock/inspection failures and retry
                     pass
-
-                # Ask storage to refresh the mem-index for this key as a
-                # best-effort (may be a no-op if already run).
-                try:
-                    await self.hdf.ensure_mem_index(
-                        bucket_name, int(key.high), int(key.low)
-                    )
-                except Exception:
-                    pass
-
-                # Sleep a short time to allow worker publication/visibility
-                try:
-                    # Use asyncio.sleep here so we don't block the event loop.
-                    await asyncio.sleep(0.02)
-                    try:
-                        logger.debug(
-                            f"[CIDStore.insert] waiting for mem_index publication for {(bucket_name, int(key.high), int(key.low))}"
-                        )
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-                if not seen:
-                    try:
-                        import numpy as _np
-
-                        entry = _np.zeros((), dtype=HASH_ENTRY_DTYPE)
-                        entry["key_high"] = int(key.high)
-                        entry["key_low"] = int(key.low)
-                        entry["slots"][0]["high"] = int(value.high)
-                        entry["slots"][0]["low"] = int(value.low)
-                        entry["slots"][1]["high"] = 0
-                        entry["slots"][1]["low"] = 0
-                        try:
-                            # Only publish the fallback canonical entry if there is
-                            # no existing worker-published entry with a WAL time.
-                            with self.hdf._mem_index_lock:
-                                existing_time = self.hdf._mem_index_wal_times.get((
-                                    bucket_name,
-                                    int(key.high),
-                                    int(key.low),
-                                ))
-                            if existing_time is None:
-                                # Prefer the storage helper which sets both the
-                                # mem-index entry and its wal_time under the
-                                # mem-index lock atomically.
-                                try:
-                                    self.hdf._publish_mem_index(
-                                        bucket_name,
-                                        int(key.high),
-                                        int(key.low),
-                                        entry,
-                                        None,
-                                        origin="insert_fallback",
-                                    )
-                                except Exception:
-                                    # Helper failed — fall back to an explicit
-                                    # atomic assignment under the mem-index lock.
-                                    try:
-                                        try:
-                                            entry_copy = _np.copy(entry)
-                                        except Exception:
-                                            entry_copy = entry
-                                        with self.hdf._mem_index_lock:
-                                            self.hdf._mem_index[
-                                                (
-                                                    bucket_name,
-                                                    int(key.high),
-                                                    int(key.low),
-                                                )
-                                            ] = entry_copy
-                                            self.hdf._mem_index_wal_times[
-                                                (
-                                                    bucket_name,
-                                                    int(key.high),
-                                                    int(key.low),
-                                                )
-                                            ] = None
-                                    except Exception:
-                                        # Last-resort: try helper again and otherwise swallow errors
-                                        try:
-                                            self.hdf._publish_mem_index(
-                                                bucket_name,
-                                                int(key.high),
-                                                int(key.low),
-                                                entry,
-                                                None,
-                                            )
-                                        except Exception:
-                                            pass
-                        except Exception:
-                            pass
-                        try:
-                            logger.info(
-                                f"[CIDStore.insert] published fallback mem_index for {(bucket_name, int(key.high), int(key.low))}"
-                            )
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-
-                # After publishing a minimal fallback entry, ask the
-                # storage worker to publish the canonical entry. This
-                # may be a no-op if the canonical entry is already
-                # present, but helps make visibility deterministic.
-                try:
-                    await self.hdf.ensure_mem_index(
-                        bucket_name, int(key.high), int(key.low)
-                    )
-                except Exception:
-                    pass
         except Exception:
+            # Ignore failures in visibility check
             pass
+
+    # New: insert a semantic triple (S, P, O) where P may be specialized
+    async def insert_triple(self, subject: E, predicate: E, obj: Any) -> None:
+            """Insert semantic triple (subject, predicate, obj).
+
+            If predicate is registered in predicate_registry the value is
+            routed to the specialized data structure. Otherwise, uses the
+            composite key system for triple storage.
+            """
+            ds = self.predicate_registry.get(predicate)
+            if ds is not None:
+                # Route to specialized DS
+                await ds.insert(subject, obj)
+                return
+
+            # Fallback: use composite key system (spec20)
+            # TODO: Implement composite key storage for non-specialized predicates
+            # For now, store as normal multivalue entry
+            if isinstance(obj, E):
+                await self.insert(subject, obj)
+            else:
+                # try to canonicalize to E via from_str
+                try:
+                    await self.insert(subject, E.from_str(str(obj)))
+                except Exception:
+                    # last resort: attempt to store numeric as int->E
+                    try:
+                        await self.insert(subject, E.from_int(int(obj)))
+                    except Exception:
+                        # Cannot store non-E value in generic store
+                        raise ValueError(f"Cannot store non-E value {obj!r} without specialized predicate")
+
+    async def _query_osp_all(self, obj: Any):
+        """Query OSP across all registered predicates in parallel.
+
+        Returns list of (subject, predicate) pairs.
+        """
+        async def q_one(p: E, ds):
+            try:
+                subs = await ds.query_osp(obj)
+                return [(s, p) for s in subs]
+            except Exception:
+                return []
+
+        tasks = [q_one(p, self.predicate_registry.get(p)) for p in self.predicate_registry.all_predicates()]
+        results = await asyncio.gather(*tasks)
+        out = []
+        for r in results:
+            out.extend(r)
+        return out
+
+    async def query_triple(self, subject: E | None = None, predicate: E | None = None, obj: Any | None = None):
+        """Query triples. Support SPO, OSP, and POS patterns.
+
+        - SPO: subject+predicate -> objects
+        - OSP: object+predicate -> subjects (if predicate given) or fan-out to all
+        - POS: predicate+object -> subjects
+        """
+        # SPO: (subject, predicate, ?)
+        if subject is not None and predicate is not None and obj is None:
+            ds = self.predicate_registry.get(predicate)
+            if ds is not None:
+                return await ds.query_spo(subject)
+            # fallback to main store
+            return await self.get(subject)
+
+        # OSP where predicate known: (?, predicate, object)
+        if obj is not None and predicate is not None and subject is None:
+            ds = self.predicate_registry.get(predicate)
+            if ds is not None:
+                return await ds.query_osp(obj)
+            # fallback: scan main store (not implemented here)
+            return []
+
+        # POS: (?, predicate, object) - same as OSP with known predicate
+        # This is an alias for the OSP case above for clarity
+        
+        # OSP where predicate unknown: (?, ?, object) -> fan out to all
+        if obj is not None and predicate is None and subject is None:
+            return await self._query_osp_all(obj)
+
+        # other patterns: fallback to existing helpers (not implemented)
+        return []
+
+    async def query_pos(self, predicate: E, obj: Any) -> Set[E]:
+        """POS query: Find subjects where (subject, predicate, object) exists.
+        
+        This is a convenience method that's equivalent to:
+        query_triple(subject=None, predicate=predicate, obj=obj)
+        """
+        ds = self.predicate_registry.get(predicate)
+        if ds is not None:
+            return await ds.query_pos(obj)
+        return set()
 
     async def _maybe_split_bucket(self, bucket_id: int) -> None:
         """Split bucket if it's over threshold (adaptive based on danger score) and has sufficient local depth."""

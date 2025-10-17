@@ -1,5 +1,53 @@
 # CIDStore Python API
 
+## CIDSem Integration Overview  
+
+CIDStore integrates with the CIDSem project to provide optimized storage for semantic triples derived from complex statements. The integration follows CIDSem's ontology format and term grammar for consistent predicate naming and performance-justified specialization.
+
+### CIDSem Term Grammar Support
+
+```python
+from cidstore.predicates import PredicateRegistry
+from cidstore.keys import E
+
+# Initialize registry with CIDSem validation
+registry = PredicateRegistry()
+
+# Register predicates using CIDSem format: kind:namespace:label
+friends_store = registry.register_cidsem_multivalue(
+    "R:usr:friendsWith",  # Relation, user namespace, friendsWith label
+    "Bidirectional social graph queries require specialized indexing"
+)
+
+quantity_store = registry.register_cidsem_counter(
+    "R:usr:ownedQuantity", 
+    "Quantity aggregation enables O(1) operations vs O(n) triple enumeration"
+)
+
+# CIDSem entities (E:namespace:label format)
+alice = E.from_str("E:usr:alice")
+bob = E.from_str("E:usr:bob")
+
+# Insert triples using specialized data structures
+await friends_store.insert(alice, bob)  # Alice friends with Bob
+await quantity_store.insert(alice, 5)   # Alice owns 5 items
+
+# Audit ontology discipline per CIDSem constraints
+audit = registry.audit_ontology_discipline()
+if audit['violations']:
+    print(f"Ontology violations: {audit['violations']}")
+```
+
+### Supported CIDSem Term Types
+
+- **Entities**: `E:<namespace>:<label>` (e.g., `E:usr:alice`, `E:geo:berlin`)
+- **Relations**: `R:<namespace>:<label>` (e.g., `R:usr:friendsWith`, `R:sys:madeClaimAbout`)
+- **Events**: `EV:<namespace>:<label>` (e.g., `EV:usr:postedMessage`)
+- **Literals**: `L:<type>:<value>` (e.g., `L:int:42`, `L:str:hello`)
+- **Contexts**: `C:<namespace>:<label>` (e.g., `C:sys:CupPlacementRule`)
+
+---
+
 ## `CIDStore` (`src/cidstore/store.py`)
 
 ```
@@ -17,8 +65,10 @@ class CIDStore:
 
 **Key Methods:**
 - `insert(key, value)`: Insert a value for a key (multi-value supported).
+- `insert_triple(subject, predicate, object)`: Insert semantic triple with predicate specialization routing.
 - `delete(key, value=None)`: Delete a key or a specific value.
 - `lookup(key)`: Return all values for a key.
+- `query_triple(subject=None, predicate=None, object=None)`: Query triples using SPO/OSP/POS patterns.
 - `compact(key)`: Compact a ValueSet for a key.
 - `demote_if_possible(key)`: Demote a spilled ValueSet to inline if possible.
 - `valueset_exists(key)`: Check if a ValueSet exists for a key.
@@ -28,6 +78,74 @@ class CIDStore:
 - `migrate_directory()`: Migrate directory from attribute to dataset (Spec 3).
 - `get_metrics()`: Return Prometheus/monitoring metrics.
 - `log_event(event, **kwargs)`: Log merge/GC/error events.
+- `predicate_registry`: PredicateRegistry instance for managing specialized data structures.
+
+---
+
+## `PredicatePluginManager` (`src/cidstore/plugins.py`)
+
+```
+class PredicatePluginManager:
+    """
+    PredicatePluginManager: Manages discovery, loading, and validation of predicate plugins.
+    
+    - Discovers plugins via Python entry points
+    - Validates plugin implementations and configurations
+    - Creates and manages specialized data structure instances
+    - Supports hot reload and runtime configuration changes
+    """
+```
+
+**Key Methods:**
+- `discover_plugins()`: Discover all available plugins via entry points
+- `load_plugin(plugin_name: str)`: Load and instantiate a plugin by name
+- `register_predicate(predicate: E, plugin_name: str, config: Dict)`: Register predicate with plugin
+- `get_plugin(plugin_name: str)`: Get loaded plugin instance
+
+---
+
+## `PredicatePlugin` (`src/cidstore/plugins.py`)
+
+```
+class PredicatePlugin:
+    """
+    Base class for all predicate specialization plugins.
+    
+    - Defines interface for plugin implementations
+    - Handles configuration validation and schema definition
+    - Creates specialized data structure instances per predicate
+    - Enables extensible predicate specialization without core changes
+    """
+```
+
+**Key Methods:**
+- `plugin_name`: Unique plugin identifier property
+- `supported_value_types`: Set of Python types this plugin handles
+- `create_instance(predicate: E, config: Dict)`: Create DS instance for predicate
+- `validate_config(config: Dict)`: Validate plugin-specific configuration
+- `get_default_config()`: Return default configuration parameters
+- `get_schema()`: Return JSON schema for configuration validation
+
+---
+
+## `SpecializedDataStructure` (`src/cidstore/predicates.py`)
+
+```
+class SpecializedDataStructure:
+    """
+    Base class for predicate-specialized data structures.
+    
+    - All specialized DS implement bidirectional indexing (forward + reverse)
+    - Forward index: CID_SP -> values (for SPO queries)
+    - Reverse index: value -> Set[CID_SP] (for OSP queries)
+    - Composite key CID_SP = hash(Subject || Predicate) for efficient indexing
+    """
+```
+
+**Key Methods:**
+- `insert(subject: E, object: Any)`: Insert (subject, predicate, object) into specialized DS
+- `query_spo(subject: E)`: SPO query - get object(s) for given subject
+- `query_osp(object: Any)`: OSP query - get all subjects with this object value
 
 ---
 
@@ -149,3 +267,6 @@ class BackgroundGC(threading.Thread):
 ---
 
 For more details, see the docstrings in each module and the `docs/` folder for full specifications.
+
+**Predicate Specialization:**
+For semantic/RDF workloads, see [Spec 12: Predicate Specialization](spec%2012%20-%20Predicate%20Specialization.md) for complete coverage of specialized data structures, SPO/OSP/POS query patterns, and performance characteristics.

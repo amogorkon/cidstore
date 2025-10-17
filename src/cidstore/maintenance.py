@@ -13,15 +13,17 @@ import asyncio
 import logging
 import threading
 import time
+
+# Python 3.13+: copy.replace() for immutable dataclass updates
+# copy.replace was added in Python 3.13. For older Python versions fall
+# back to dataclasses.replace which provides equivalent semantics for
+# updating dataclass instances.
+try:
+    from copy import replace  # type: ignore
+except Exception:  # pragma: no cover - fallback for older Pythons
+    from dataclasses import replace  # type: ignore
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-# Python 3.13+ feature: copy.replace() for immutable dataclass updates
-try:
-    from copy import replace  # Python 3.13+
-except ImportError:
-    # Fallback for Python < 3.13: use dataclasses.replace
-    from dataclasses import replace
 
 from . import wal_analyzer
 from .constants import DELETION_RECORD_DTYPE, OpType
@@ -45,9 +47,8 @@ class WALInsight:
 class MaintenanceConfig:
     """Configuration for background maintenance operations.
 
-    Python 3.13 Note: This dataclass supports copy.replace() for creating
-    modified configurations without mutation:
-        new_config = replace(old_config, gc_interval=120)
+    Python 3.13: Uses copy.replace() for efficient immutable updates.
+    Free-threading compatible: All configuration is immutable.
     """
 
     # GC settings

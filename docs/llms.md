@@ -10,7 +10,7 @@ This file is a concise machine-oriented summary of the `cidstore` project intend
 | name | cidstore |
 | repo | amogorkon/cidtree |
 | root | `E:/Dropbox/code/cidstore` |
-| python_version | 3.12 |
+| python_version | 3.13 |
 | primary_contact | amogorkon |
 | purpose | Content-addressed ID/key-value store with HDF5-backed buckets and an append-only WAL |
 

@@ -7,7 +7,8 @@
 | Lookup Latency         | <50μs (avg), <100μs (P99)                |
 | Recovery Time          | <30s after crash                         |
 | Concurrency            | SWMR: 1 writer, many readers             |
-| Range Queries          | Not supported                            |
+| Semantic Queries       | SPO/OSP/POS triple patterns via predicate specialization |
+| Range Queries          | Supported for time-series and ordered predicates via specialized plugins |
 | Transaction Isolation  | Eventual consistency for readers         |
 
 ## System Overview
@@ -16,6 +17,7 @@ This system is a disk-backed, concurrent hash directory for 128-bit keys and val
 
 - **Hash Directory & Buckets:** An extensible array of HDF5-backed buckets, each with in-place sorted and unsorted regions for efficient insert and lookup. Buckets split and merge atomically (CoW + WAL) to maintain balance and performance.
 - **Multi-Value Key Handling:** Each HashEntry stores up to two CIDs inline. If more than two values are associated with a key, the entry is promoted to reference an external HDF5 ValueSet (via a SpillPointer). Promotion/demotion is atomic and logged.
+- **Semantic Triple Support & Plugin Architecture:** Built-in support for RDF-style (Subject, Predicate, Object) triples with explicit plugin registry for predicate specialization. Unified query interface `query(P, S, O)` dispatches based on bound parameters: single-step for predicate-known patterns (SPO/POS), two-step for subject-known patterns (uses main store routing), and fan-out for object-only patterns (OSP across ~200 predicates max). Explicit plugin registration enables custom data structures (counters, sets, timestamps, geospatial, fulltext, etc.) with performance characteristics (supports_osp/pos flags, concurrency limits) defined in configuration.
 - **Write-Ahead Log (WAL):** All mutating operations (insert, split, merge, delete) are logged in a fixed-width, memory-mapped WAL for atomicity and crash recovery. WAL replay is idempotent and ensures consistency after failure.
 - **Deletion Log & GC:** Deletions are tracked in a dedicated log. Background GC scans for orphans and reclaims space, with all operations being idempotent and safe for crash recovery.
 - **Concurrency & SWMR:** HDF5 SWMR mode enables a single writer and many concurrent readers. All modifications use copy-on-write, and a global writer lock ensures consistency.
@@ -30,12 +32,19 @@ For canonical data structure diagrams and type definitions, see [Spec 2: Data Ty
 - Disk-backed, concurrent hash directory for 128-bit keys/values
 - Optimized for scale, throughput, and crash consistency
 - HDF5 SWMR mode for concurrency; extensible hashing for scalability
+- RDF/semantic triple support with explicit predicate plugin registry
+- CIDSem ontology integration: kind:namespace:label term format (~200 predicate limit)
+- Unified query interface: `query(P, S, O)` with automatic dispatch based on bound parameters
+- Query patterns: single-step O(1), two-step O(k), fan-out O(m≤200) with concurrency control
+- Configuration-driven performance management with per-plugin audit APIs
 
 **Non-Goals:**
-- No range queries (unordered keys)
+- No range queries on hash keys (unordered)
 - No in-place updates (append-only)
 - Readers see eventual consistency
 - No built-in access control, authentication, or encryption (must be external)
+
+**Note:** Range queries are supported for specific predicates (e.g., time-series, ordered sets) through specialized plugin implementations, but not on the hash directory keys themselves.
 
 ### Architecture Overview
 ```mermaid
@@ -97,3 +106,6 @@ graph TD
 - [Spec 9: HDF5 Layout](spec%209%20-%20HDF5.md)
 - [Spec 10: Microservice](spec%2010%20-%20Microservice.md)
 - [Spec 11: Conclusion](spec%2011%20-%20Conclusion.md)
+- [Spec 12: Predicate Specialization](spec%2012%20-%20Predicate%20Specialization.md)
+- [Spec 13: Plugin Infrastructure](spec%2013%20-%20Plugin%20Infrastructure.md)
+- [Spec 14: CIDSem Integration](spec%2014%20-%20CIDSem%20Integration.md)

@@ -450,19 +450,13 @@ class WAL:
         """Cleanup on deletion.
 
         Python 3.13: Handles PythonFinalizationError gracefully during interpreter shutdown.
+        Free-threading compatible: Safe for concurrent finalization.
         """
+        from builtins import PythonFinalizationError
         from contextlib import suppress
 
-        try:
-            # PythonFinalizationError is new in Python 3.13
-            from builtins import PythonFinalizationError
-
-            with suppress(Exception, PythonFinalizationError):
-                self.close()
-        except ImportError:
-            # Python < 3.13
-            with suppress(Exception):
-                self.close()
+        with suppress(Exception, PythonFinalizationError):
+            self.close()
 
     def _next_hybrid_time(self):
         """

@@ -37,6 +37,37 @@ classDiagram
         +low: uint64
     }
 
+    class PredicateRegistry {
+        +plugin_registry: PluginRegistry
+        +_registry: Map[E, SpecializedDS]
+        +predicate_to_cid: Map[string, E]
+        +cid_to_predicate: Map[E, string]
+        +system_config: Dict
+        +load_from_config(config_path: string)
+        +audit_all_plugins(): Map[string, Dict]
+        +query_osp_parallel(obj: Any): Map[string, Set[E]]
+    }
+
+    class PluginRegistry {
+        +plugins: Map[string, Type[SpecializedDS]]
+        +register(name: string, plugin_class: Type)
+        +create_instance(name: string, predicate: E, config: Dict): SpecializedDS
+        +list_plugins(): List[string]
+    }
+
+    class SpecializedDataStructure {
+        +predicate: E
+        +config: Dict
+        +supports_osp: bool
+        +supports_pos: bool
+        +concurrency_limit: int
+        +insert(subject: E, object: Any)
+        +query_spo(subject: E): Any
+        +query_osp(object: Any): Set[E]
+        +query_pos(object: Any): Set[E]
+        +audit_performance(): Dict
+    }
+
     class WALRecord {
         +version_op: uint8 "2-bit version, 6-bit opcode"
         +reserved: uint8 "padding/flags"
@@ -80,6 +111,11 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 | Directory         | `[BucketPointer[] bucket_pointers, global_depth: u8, num_buckets: u32]` | Var    | Array of bucket pointers indexed by top `global_depth` bits of key |
 | Bucket            | `[HashEntry[] entries, sorted_count: u32, local_depth: u8]` | Var    | Bucket with sorted and unsorted regions; `local_depth` determines key bits that belong to this bucket |
 | Bucket Pointer    | `[bucket_id: u32, hdf5_ref: u64]`                           | 12B    | Points to bucket dataset in HDF5, indexed by key prefix          |
+| Predicate Plugin | `[plugin_name: string, plugin_class: Type[SpecializedDS]]` | Var | Plugin class registered in PluginRegistry for creating specialized DS instances |
+| Plugin Registry  | `[plugins: Map[string, Type[SpecializedDS]]]`              | Var    | Explicit registry mapping plugin names to implementation classes |
+| Predicate Registry | `[_registry: Map[E, SpecializedDS], predicate_to_cid: Map[string, E], system_config: Dict]` | Var | Combines CIDSem validation with plugin instantiation and configuration loading |
+| Performance Config | `[supports_osp: bool, supports_pos: bool, concurrency_limit: int, baseline_ms: float]` | Var | Per-predicate performance characteristics and constraints |
+| System Config    | `[max_concurrent_osp: int, max_predicates: int, monitoring_enabled: bool]` | Var | Global system-level configuration for plugin infrastructure |
 
 ## 2.3 Extendible Hashing Scheme
 
@@ -119,6 +155,27 @@ def find_bucket(key: E, global_depth: int) -> bucket_id:
 - The presence of a SpillPointer in a HashEntry indicates that the values for the key are stored externally in a ValueSet dataset.
 - When a key has more than two values, the entry is promoted to spill mode and a SpillPointer is used.
 - Demotion is possible if the value count drops to two or fewer.
+
+### Predicate Specialization and Plugin Architecture
+- **Registry-Based Routing:** When a predicate is registered for specialization, queries check the in-memory predicate registry for dispatch.
+- **Composite Key System:** Non-specialized predicates use composite keys from spec20 (composite(S,P,r) patterns for SPO/OSP/POS).
+- **Explicit Plugin Registry:** Plugins are explicitly registered by name with their implementation classes (no dynamic discovery).
+- **Configuration-Driven:** JSON/YAML config files map CIDSem predicates to plugin instances with performance characteristics.
+- **Query Pattern Support:**
+  - **SPO (Subject-Predicate-Object):** Direct registry check, route to plugin or composite key system
+  - **OSP (Object-Subject-Predicate):** Parallel fan-out across registered predicates using reverse indices (respects `supports_osp` flag)
+  - **POS (Predicate-Object-Subject):** Direct query to specific predicate's reverse index (respects `supports_pos` flag)
+  - **Unknown-P patterns:** Fan-out to all ~200 registered predicates with concurrency control
+- **Performance Management:**
+  - Per-predicate `supports_osp` and `supports_pos` flags control query capabilities
+  - Per-predicate `concurrency_limit` for resource management
+  - System-wide `max_concurrent_osp` for parallel query control
+  - Plugin-specific `audit_performance()` method for monitoring
+- **Built-in Plugins:**
+  - `counter`: Atomic integer operations with OSP/POS support
+  - `multivalue_set`: Set-based multi-value storage with OSP/POS support
+  - `timeseries`: Time-ordered data with optional OSP support
+  - `fulltext`: Text search (typically `supports_osp=false` due to cost)
 
 ## 2.5 Network Message Schema (msgpack via zmq)
 
@@ -213,5 +270,9 @@ classDiagram
 |-------|---------|---------------------|
 | high  | uint64  | High 64 bits of E |
 | low   | uint64  | Low 64 bits of E  |
+
+**Cross-References:**
+- [Spec 12: Predicate Specialization](spec%2012%20-%20Predicate%20Specialization.md) - Query patterns and specialized DS APIs
+- [Spec 13: Plugin Infrastructure](spec%2013%20-%20Plugin%20Infrastructure.md) - Plugin system for extensible predicate specialization
 
 ---

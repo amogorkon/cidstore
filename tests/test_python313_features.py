@@ -1,6 +1,7 @@
 """Test Python 3.13 features in CIDStore.
 
-This module tests Python 3.13 specific features and their backward compatibility.
+This module tests Python 3.13 specific features including free-threading and JIT.
+Python 3.13+ is REQUIRED - no backward compatibility.
 """
 
 import sys
@@ -9,9 +10,13 @@ import pytest
 
 from cidstore.maintenance import MaintenanceConfig
 
+# Verify Python 3.13+ requirement
+if sys.version_info < (3, 13):
+    pytest.skip("Python 3.13+ required", allow_module_level=True)
+
 
 def test_copy_replace_feature():
-    """Test copy.replace() for dataclass modification (Python 3.13 feature)."""
+    """Test copy.replace() for dataclass modification (Python 3.13 native feature)."""
     # Create a default config
     config = MaintenanceConfig()
 
@@ -39,11 +44,7 @@ def test_copy_replace_feature():
 
 def test_maintenance_config_replace():
     """Test manual replace usage on MaintenanceConfig."""
-    # Import replace (with fallback for Python < 3.13)
-    try:
-        from copy import replace
-    except ImportError:
-        from dataclasses import replace
+    from copy import replace  # Python 3.13 native - no fallback
 
     config = MaintenanceConfig(
         gc_interval=120, maintenance_interval=60, sort_threshold=32
@@ -68,39 +69,42 @@ def test_maintenance_config_replace():
 
 
 def test_python_version_check():
-    """Verify Python version and print feature availability."""
+    """Verify Python version and runtime configuration."""
     version = sys.version_info
     print(f"\nPython version: {version.major}.{version.minor}.{version.micro}")
 
-    # Check for Python 3.13+ features
-    has_copy_replace = False
-    try:
-        from copy import replace
+    # Verify Python 3.13 features are available
+    from copy import replace
 
-        has_copy_replace = True
-    except ImportError:
-        pass
+    assert replace is not None
+    print("✅ copy.replace() available")
 
-    has_finalization_error = hasattr(__builtins__, "PythonFinalizationError")
+    # Check runtime configuration
+    gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
+    jit_enabled = hasattr(sys, "_is_jit_enabled") and sys._is_jit_enabled()
 
-    print("Python 3.13 features:")
-    print(
-        f"  - copy.replace(): {'✅' if has_copy_replace else '❌ (using dataclasses.replace fallback)'}"
-    )
-    print(f"  - PythonFinalizationError: {'✅' if has_finalization_error else '❌'}")
+    print(f"  - GIL enabled: {gil_enabled}")
+    print(f"  - JIT enabled: {jit_enabled}")
+
+    if not gil_enabled:
+        print("  ✅ Free-threading mode active!")
+    else:
+        print("  ℹ️ Free-threading disabled (run with -X gil=0)")
+
+    if jit_enabled:
+        print("  ✅ JIT compiler active!")
+    else:
+        print("  ℹ️ JIT disabled (run with -X jit=1)")
 
     # Verify we can import and use the features
-    from cidstore.maintenance import MaintenanceConfig
-
     config = MaintenanceConfig()
     test_config = config.with_testing_timeouts()
     assert test_config.gc_interval == 5
 
 
-@pytest.mark.skipif(sys.version_info < (3, 13), reason="Requires Python 3.13+")
-def test_python313_specific_features():
-    """Test features that only work on Python 3.13+."""
-    # Verify it's the real copy.replace, not dataclasses.replace
+def test_python313_native_features():
+    """Test features that use Python 3.13 native implementations."""
+    # Verify it's the real copy.replace from copy module
     import copy
     from copy import replace
 
@@ -141,11 +145,7 @@ if __name__ == "__main__":
     test_copy_replace_feature()
     test_maintenance_config_replace()
     test_finalization_error_handling()
-
-    if sys.version_info >= (3, 13):
-        test_python313_specific_features()
-    else:
-        print("\n⚠️  Skipping Python 3.13-specific tests (Python 3.13+ required)")
+    test_python313_native_features()
 
     print("\n" + "=" * 60)
     print("All tests passed! ✅")

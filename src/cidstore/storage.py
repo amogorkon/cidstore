@@ -110,6 +110,11 @@ class Storage:
             name="cidstore-hdf-result-dispatcher",
             daemon=True,
         )
+        # Shutdown coordination event to allow timeouts in queue.get loops
+        # This avoids threads hanging indefinitely if a sentinel is not
+        # delivered due to a race during close(). Using an Event makes the
+        # shutdown cooperative and robust across platforms.
+        self._shutdown_event = threading.Event()
         # Initialize on-disk layout before starting the worker thread so the
         # worker's persistent file handle observes the canonical layout. If
         # we start the worker early it may open the file before groups/dsets
@@ -301,10 +306,40 @@ class Storage:
         finally:
             # Signal worker thread to exit and wait for it
             try:
-                if hasattr(self, "_worker_queue"):
-                    self._worker_queue.put(None)
-                if hasattr(self, "_worker_thread") and self._worker_thread is not None:
-                    self._worker_thread.join(timeout=5)
+                # Signal shutdown via event first so worker/dispatcher loops
+                # using timeout-based gets can exit promptly.
+                try:
+                    self._shutdown_event.set()
+                except Exception:
+                    pass
+                # Best-effort: put sentinels to unblock any blocking get() calls
+                try:
+                    if hasattr(self, "_worker_queue"):
+                        self._worker_queue.put(None)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, "_result_queue"):
+                        self._result_queue.put(None)
+                except Exception:
+                    pass
+                # Wait briefly for threads to exit
+                try:
+                    if (
+                        hasattr(self, "_worker_thread")
+                        and self._worker_thread is not None
+                    ):
+                        self._worker_thread.join(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    if (
+                        hasattr(self, "_result_dispatcher_thread")
+                        and self._result_dispatcher_thread is not None
+                    ):
+                        self._result_dispatcher_thread.join(timeout=5)
+                except Exception:
+                    pass
             except Exception:
                 pass
 

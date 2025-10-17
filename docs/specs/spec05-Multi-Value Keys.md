@@ -52,7 +52,30 @@ External value‑lists are append‑only with tombstoning. Compaction is a backg
 
 Inline multi-values are used for low-cardinality keys; when a threshold is exceeded, promotion to an external value-list occurs (WAL-logged, atomic). Demotion is handled in maintenance to avoid thrashing. This hybrid approach reduces bucket bloat and ensures efficient memory use.
 
+### 5.4 Predicate Specialization Alternative
+
+For semantic/RDF workloads with well-defined predicates (~200 predicates in typical ontologies), predicate-specialized data structures provide superior performance:
+
+- **Registry-Based Routing:** In-memory predicate registry determines if queries route to specialized plugins
+- **Composite Key System:** Non-specialized predicates use spec20 composite keys for triple storage
+- **Bidirectional Indices:** Each specialized DS maintains both forward (SPO) and reverse (OSP) indices
+- **Query Pattern Optimization:**
+  - SPO: Registry check, then plugin lookup or composite key system
+  - OSP: Parallel fan-out across all registered predicates (~200 concurrent queries)
+  - POS: Direct reverse-index query on specific predicate
+  - Unknown-P: Fan-out to all predicates with concurrency control
+
+This approach is preferred over generic multivalue promotion when:
+- Predicates are known and bounded (~200 total)
+- Query patterns require efficient reverse lookup (OSP/POS)
+- Values have specific semantics (counters, sets, timestamps)
+- Deduplication or ordering constraints apply per predicate type
+
 
 ## 5.7 WAL‑Driven Adaptive Maintenance
 
 See [Spec 4: Write-Ahead Log (WAL)](spec%204%20-%20WAL.md#45-wal-driven-adaptive-maintenance) for all details on danger score, merge scheduling, protections, and journaling.
+
+## 5.8 Cross-Reference: Predicate Specialization
+
+For comprehensive coverage of predicate-specialized data structures, composite CID_SP indexing, and SPO/OSP/POS query patterns, see [Spec 12: Predicate Specialization](spec%2012%20-%20Predicate%20Specialization.md).
