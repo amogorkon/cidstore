@@ -26,10 +26,10 @@ from .keys import E
 from .logger import get_logger
 from .maintenance import MaintenanceConfig, MaintenanceManager
 from .metrics import init_metrics_and_autotune
+from .predicates import PredicateRegistry
 from .storage import Storage
 from .utils import assumption
 from .wal import WAL
-from .predicates import PredicateRegistry
 
 logger = get_logger(__name__)
 
@@ -1163,40 +1163,43 @@ class CIDStore:
 
     # New: insert a semantic triple (S, P, O) where P may be specialized
     async def insert_triple(self, subject: E, predicate: E, obj: Any) -> None:
-            """Insert semantic triple (subject, predicate, obj).
+        """Insert semantic triple (subject, predicate, obj).
 
-            If predicate is registered in predicate_registry the value is
-            routed to the specialized data structure. Otherwise, uses the
-            composite key system for triple storage.
-            """
-            ds = self.predicate_registry.get(predicate)
-            if ds is not None:
-                # Route to specialized DS
-                await ds.insert(subject, obj)
-                return
+        If predicate is registered in predicate_registry the value is
+        routed to the specialized data structure. Otherwise, uses the
+        composite key system for triple storage.
+        """
+        ds = self.predicate_registry.get(predicate)
+        if ds is not None:
+            # Route to specialized DS
+            await ds.insert(subject, obj)
+            return
 
-            # Fallback: use composite key system (spec20)
-            # TODO: Implement composite key storage for non-specialized predicates
-            # For now, store as normal multivalue entry
-            if isinstance(obj, E):
-                await self.insert(subject, obj)
-            else:
-                # try to canonicalize to E via from_str
+        # Fallback: use composite key system (spec20)
+        # TODO: Implement composite key storage for non-specialized predicates
+        # For now, store as normal multivalue entry
+        if isinstance(obj, E):
+            await self.insert(subject, obj)
+        else:
+            # try to canonicalize to E via from_str
+            try:
+                await self.insert(subject, E.from_str(str(obj)))
+            except Exception:
+                # last resort: attempt to store numeric as int->E
                 try:
-                    await self.insert(subject, E.from_str(str(obj)))
+                    await self.insert(subject, E.from_int(int(obj)))
                 except Exception:
-                    # last resort: attempt to store numeric as int->E
-                    try:
-                        await self.insert(subject, E.from_int(int(obj)))
-                    except Exception:
-                        # Cannot store non-E value in generic store
-                        raise ValueError(f"Cannot store non-E value {obj!r} without specialized predicate")
+                    # Cannot store non-E value in generic store
+                    raise ValueError(
+                        f"Cannot store non-E value {obj!r} without specialized predicate"
+                    )
 
     async def _query_osp_all(self, obj: Any):
         """Query OSP across all registered predicates in parallel.
 
         Returns list of (subject, predicate) pairs.
         """
+
         async def q_one(p: E, ds):
             try:
                 subs = await ds.query_osp(obj)
@@ -1204,14 +1207,22 @@ class CIDStore:
             except Exception:
                 return []
 
-        tasks = [q_one(p, self.predicate_registry.get(p)) for p in self.predicate_registry.all_predicates()]
+        tasks = [
+            q_one(p, self.predicate_registry.get(p))
+            for p in self.predicate_registry.all_predicates()
+        ]
         results = await asyncio.gather(*tasks)
         out = []
         for r in results:
             out.extend(r)
         return out
 
-    async def query_triple(self, subject: E | None = None, predicate: E | None = None, obj: Any | None = None):
+    async def query_triple(
+        self,
+        subject: E | None = None,
+        predicate: E | None = None,
+        obj: Any | None = None,
+    ):
         """Query triples. Support SPO, OSP, and POS patterns.
 
         - SPO: subject+predicate -> objects
@@ -1236,7 +1247,7 @@ class CIDStore:
 
         # POS: (?, predicate, object) - same as OSP with known predicate
         # This is an alias for the OSP case above for clarity
-        
+
         # OSP where predicate unknown: (?, ?, object) -> fan out to all
         if obj is not None and predicate is None and subject is None:
             return await self._query_osp_all(obj)
@@ -1246,7 +1257,7 @@ class CIDStore:
 
     async def query_pos(self, predicate: E, obj: Any) -> Set[E]:
         """POS query: Find subjects where (subject, predicate, object) exists.
-        
+
         This is a convenience method that's equivalent to:
         query_triple(subject=None, predicate=predicate, obj=obj)
         """

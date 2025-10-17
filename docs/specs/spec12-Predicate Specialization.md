@@ -69,10 +69,10 @@ The system routes queries based on whether the predicate is registered in the pl
 ```python
 async def route_query(P: E, S: E, O: Optional[E]):
     """Route query to specialized plugin or composite key system."""
-    
+
     # Check if predicate is specialized
     plugin = predicate_registry.get(P)
-    
+
     if plugin:
         # Specialized: use plugin's internal indices
         if O is None:
@@ -104,7 +104,7 @@ from cidstore.composite import create_composite_key
 spo_key = create_composite_key(subject, predicate, r=0)
 store[spo_key] = object
 
-# OSP: composite(O, S, r=1) -> P  
+# OSP: composite(O, S, r=1) -> P
 osp_key = create_composite_key(object, subject, r=1)
 store[osp_key] = predicate
 
@@ -132,7 +132,7 @@ class CounterStore(SpecializedDataStructure):
         self.predicate = predicate
         # Plugin maintains its own indices - no composite keys needed
         self.spo_index = {}    # Subject → int
-        self.osp_index = {}    # int → Set[Subject]  
+        self.osp_index = {}    # int → Set[Subject]
         self.pos_index = {}    # int → Set[Subject] (same as OSP for single predicate)
 
     async def insert(self, subject: E, count: int):
@@ -210,45 +210,45 @@ async def query(
 ) -> List[Tuple[E, E, E]]:
     """
     Unified triple query interface. Returns complete triples (S, P, O).
-    
+
     Query patterns by complexity:
-    
+
     Single-step (direct lookups):
     - (P, S, ?) : O(1) - SPO via predicate plugin
     - (P, ?, O) : O(1) - POS via predicate plugin
     - (P, S, O) : O(1) - membership check
-    
+
     Two-step (enumerate predicate):
     - (P, ?, ?) : O(n) - enumerate all (S,O) from plugin[P]
-    
+
     Fan-out (unknown predicate):
     - (?, S, ?) : O(m) - fan-out to all predicates, query SPO each
     - (?, S, O) : O(m) - fan-out to all predicates, check membership each
     - (?, ?, O) : O(m) - fan-out to all predicates with supports_osp
-    
+
     Note: m ≤ 200 (ontology constraint), with concurrency control
-    
+
     Rejected:
     - (?, ?, ?) : Raises ValueError (full scan)
-    
+
     Examples:
         # SPO: What does Alice know?
         results = await store.query(P=knows, S=alice)
-        
+
         # POS: Who knows kung-fu?
         results = await store.query(P=knows, O=kung_fu)
-        
+
         # Two-step: What does Alice relate to?
         results = await store.query(S=alice)
-        
+
         # Fan-out: What relates to kung-fu?
         results = await store.query(O=kung_fu)
     """
-    
+
     # Validate input
     if P is None and S is None and O is None:
         raise ValueError("At least one parameter must be provided")
-    
+
     # Dispatch logic
     if P is not None:
         return await self._query_with_predicate(P, S, O)
@@ -265,26 +265,26 @@ async def query(
 ```python
 async def _query_with_predicate(self, P: E, S: Optional[E], O: Optional[E]) -> List[Tuple[E, E, E]]:
     """Handle queries where predicate is known."""
-    
+
     plugin = self.predicate_registry.get(P)
     if plugin is None:
         return []  # Unknown predicate
-    
+
     if S is not None and O is not None:
         # (P, S, O) - membership check
         objects = await plugin.query_spo(S)
         return [(S, P, O)] if O in objects else []
-    
+
     elif S is not None:
         # (P, S, ?) - SPO query
         objects = await plugin.query_spo(S)
         return [(S, P, o) for o in objects]
-    
+
     elif O is not None:
         # (P, ?, O) - POS query
         subjects = await plugin.query_pos(O)
         return [(s, P, O) for s in subjects]
-    
+
     else:
         # (P, ?, ?) - enumerate all triples with this predicate
         return await plugin.enumerate_all()
@@ -297,14 +297,14 @@ async def _query_with_predicate(self, P: E, S: Optional[E], O: Optional[E]) -> L
 ```python
 async def _query_with_subject(self, S: E, O: Optional[E]) -> List[Tuple[E, E, E]]:
     """Handle queries where subject is known but predicate is not."""
-    
+
     # Fan-out to all registered predicates
     async def query_one_predicate(P: E, plugin: SpecializedDataStructure):
         try:
             objects = await plugin.query_spo(S)
             if not objects:
                 return []
-            
+
             if O is not None:
                 # (?, S, O) - check if O in results
                 return [(S, P, O)] if O in objects else []
@@ -313,19 +313,19 @@ async def _query_with_subject(self, S: E, O: Optional[E]) -> List[Tuple[E, E, E]
                 return [(S, P, o) for o in objects]
         except Exception:
             return []
-    
+
     # Execute in parallel with concurrency limit
     semaphore = asyncio.Semaphore(self.config["system"]["max_concurrent_queries"])
-    
+
     async def limited_query(P: E, plugin: SpecializedDataStructure):
         async with semaphore:
             return await query_one_predicate(P, plugin)
-    
+
     tasks = [
         limited_query(P, plugin)
         for P, plugin in self.predicate_registry.items()
     ]
-    
+
     results = await asyncio.gather(*tasks)
     return [triple for sublist in results for triple in sublist]
 ```
@@ -337,7 +337,7 @@ async def _query_with_subject(self, S: E, O: Optional[E]) -> List[Tuple[E, E, E]
 ```python
 async def _query_with_object(self, O: E) -> List[Tuple[E, E, E]]:
     """Handle OSP queries - fan-out across all OSP-capable predicates."""
-    
+
     # Fan-out to all predicates with OSP support
     async def query_one_predicate(P: E, plugin: SpecializedDataStructure):
         if not plugin.supports_osp:
@@ -347,24 +347,24 @@ async def _query_with_object(self, O: E) -> List[Tuple[E, E, E]]:
             return [(s, P, O) for s in subjects]
         except Exception:
             return []
-    
+
     # Execute in parallel with concurrency limit
     semaphore = asyncio.Semaphore(self.config["system"]["max_concurrent_osp"])
-    
+
     async def limited_query(P: E, plugin: SpecializedDataStructure):
         async with semaphore:
             return await query_one_predicate(P, plugin)
-    
+
     tasks = [
         limited_query(P, plugin)
         for P, plugin in self.predicate_registry.items()
     ]
-    
+
     results = await asyncio.gather(*tasks)
     return [triple for sublist in results for triple in sublist]
 ```
 
-**Performance:** O(m) where m = number of OSP-capable predicates (typically ~200)  
+**Performance:** O(m) where m = number of OSP-capable predicates (typically ~200)
 **Note:** This is the most expensive query pattern and uses concurrency control
 
 ## 12.5 Storage and Persistence

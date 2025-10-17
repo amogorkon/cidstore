@@ -1,6 +1,6 @@
 # CIDStore Python API
 
-## CIDSem Integration Overview  
+## CIDSem Integration Overview
 
 CIDStore integrates with the CIDSem project to provide optimized storage for semantic triples derived from complex statements. The integration follows CIDSem's ontology format and term grammar for consistent predicate naming and performance-justified specialization.
 
@@ -20,7 +20,7 @@ friends_store = registry.register_cidsem_multivalue(
 )
 
 quantity_store = registry.register_cidsem_counter(
-    "R:usr:ownedQuantity", 
+    "R:usr:ownedQuantity",
     "Quantity aggregation enables O(1) operations vs O(n) triple enumeration"
 )
 
@@ -88,7 +88,7 @@ class CIDStore:
 class PredicatePluginManager:
     """
     PredicatePluginManager: Manages discovery, loading, and validation of predicate plugins.
-    
+
     - Discovers plugins via Python entry points
     - Validates plugin implementations and configurations
     - Creates and manages specialized data structure instances
@@ -110,7 +110,7 @@ class PredicatePluginManager:
 class PredicatePlugin:
     """
     Base class for all predicate specialization plugins.
-    
+
     - Defines interface for plugin implementations
     - Handles configuration validation and schema definition
     - Creates specialized data structure instances per predicate
@@ -134,7 +134,7 @@ class PredicatePlugin:
 class SpecializedDataStructure:
     """
     Base class for predicate-specialized data structures.
-    
+
     - All specialized DS implement bidirectional indexing (forward + reverse)
     - Forward index: CID_SP -> values (for SPO queries)
     - Reverse index: value -> Set[CID_SP] (for OSP queries)

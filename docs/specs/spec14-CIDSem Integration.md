@@ -13,10 +13,10 @@ CIDStore validates and supports all CIDSem term types:
 ```python
 # Entities: E:<namespace>:<label>
 alice = "E:usr:alice"
-berlin = "E:geo:berlin" 
+berlin = "E:geo:berlin"
 cup123 = "E:obj:cup123"
 
-# Relations: R:<namespace>:<label>  
+# Relations: R:<namespace>:<label>
 made_claim = "R:sys:madeClaimAbout"
 lives_in = "R:sys:livesIn"
 friends_with = "R:usr:friendsWith"
@@ -44,18 +44,18 @@ def _validate_cidsem_format(self, predicate_name: str) -> bool:
     parts = predicate_name.split(':')
     if len(parts) < 3:
         return False
-    
+
     kind = parts[0]
     # Valid kinds: E (Entity), R (Relation), EV (Event), L (Literal), C (Context)
     valid_kinds = {'E', 'R', 'EV', 'L', 'C'}
-    
+
     return kind in valid_kinds
 ```
 
 **Examples of validation:**
 
 - ✅ `R:usr:friendsWith` → Valid (Relation, usr namespace, friendsWith label)
-- ✅ `E:geo:berlin` → Valid (Entity, geo namespace, berlin label)  
+- ✅ `E:geo:berlin` → Valid (Entity, geo namespace, berlin label)
 - ✅ `R:sys::startsWithColon` → Valid (label can contain colons)
 - ❌ `foaf:knows` → Invalid (missing second colon)
 - ❌ `friendsWith` → Invalid (missing kind and namespace)
@@ -87,20 +87,20 @@ CIDStore uses explicit plugin registration with JSON/YAML configuration for pred
 ```python
 class PluginRegistry:
     """Registry for predicate plugin implementations."""
-    
+
     def __init__(self):
         self.plugins: Dict[str, Type[SpecializedDataStructure]] = {}
-    
+
     def register(self, name: str, plugin_class: Type[SpecializedDataStructure]):
         """Register a plugin implementation."""
         self.plugins[name] = plugin_class
-    
+
     def create_instance(self, name: str, predicate: E, config: Dict) -> SpecializedDataStructure:
         """Create plugin instance for a predicate."""
         if name not in self.plugins:
             raise ValueError(f"Unknown plugin: {name}")
         return self.plugins[name](predicate, **config)
-    
+
     def list_plugins(self) -> List[str]:
         """List available plugin names."""
         return list(self.plugins.keys())
@@ -114,31 +114,31 @@ plugin_registry.register("geospatial", GeospatialStore)  # Future plugin
 
 class PredicateRegistry:
     """Registry that combines CIDSem validation with plugin instantiation."""
-    
+
     def __init__(self, plugin_registry: PluginRegistry):
         self.plugin_registry = plugin_registry
         self._registry: Dict[E, SpecializedDataStructure] = {}
         self.predicate_to_cid: Dict[str, E] = {}
         self.cid_to_predicate: Dict[E, str] = {}
-    
+
     def load_from_config(self, config_path: str):
         """Load predicate configuration from JSON/YAML file."""
         with open(config_path, 'r') as f:
             config = json.load(f) if config_path.endswith('.json') else yaml.safe_load(f)
-        
+
         # Store system configuration
         self.system_config = config.get('system', {})
         self.max_concurrent_osp = self.system_config.get('max_concurrent_osp', 50)
-        
+
         for predicate_name, pred_config in config['predicates'].items():
             # Validate CIDSem format
             if not self._validate_cidsem_format(predicate_name):
                 raise ValueError(f"Invalid CIDSem format: {predicate_name}")
-            
+
             # Extract plugin and config
             plugin_name = pred_config['plugin']
             plugin_config = pred_config.get('config', {}).copy()
-            
+
             # Merge performance characteristics into plugin config
             performance = pred_config.get('performance', {})
             plugin_config.update({
@@ -146,28 +146,28 @@ class PredicateRegistry:
                 'supports_pos': performance.get('supports_pos', True),
                 'concurrency_limit': performance.get('concurrency_limit', 10)
             })
-            
+
             # Create plugin instance
             predicate_cid = self._compute_predicate_cid(predicate_name)
             plugin_instance = self.plugin_registry.create_instance(
                 plugin_name, predicate_cid, plugin_config
             )
-            
+
             # Register the instance
             self._registry[predicate_cid] = plugin_instance
             self.predicate_to_cid[predicate_name] = predicate_cid
             self.cid_to_predicate[predicate_cid] = predicate_name
-    
+
     async def query_osp_parallel(self, obj: Any) -> Dict[str, Set[E]]:
         """Execute OSP query across all predicates that support it, with concurrency control."""
         import asyncio
-        
+
         semaphore = asyncio.Semaphore(self.max_concurrent_osp)
-        
+
         async def query_with_limit(pred_cid: E, plugin: SpecializedDataStructure):
             if not plugin.supports_osp:
                 return None
-            
+
             async with semaphore:
                 try:
                     subjects = await plugin.query_osp(obj)
@@ -175,28 +175,28 @@ class PredicateRegistry:
                 except Exception as e:
                     # Log error but don't fail entire query
                     return None
-        
+
         tasks = {
             self.cid_to_predicate[pred_cid]: query_with_limit(pred_cid, plugin)
             for pred_cid, plugin in self._registry.items()
         }
-        
+
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        
+
         return {
-            pred_name: result 
+            pred_name: result
             for pred_name, result in zip(tasks.keys(), results)
             if result and not isinstance(result, Exception)
         }
-    
+
     def audit_all_plugins(self) -> Dict[str, Dict]:
         """Audit performance of all registered plugins."""
         audit_results = {}
-        
+
         for predicate_cid, plugin in self._registry.items():
             predicate_name = self.cid_to_predicate[predicate_cid]
             audit_results[predicate_name] = plugin.audit_performance()
-        
+
         return audit_results
 
 # Base plugin interface
@@ -208,25 +208,25 @@ class SpecializedDataStructure:
         self.supports_osp = config.pop('supports_osp', True)
         self.supports_pos = config.pop('supports_pos', True)
         self.concurrency_limit = config.pop('concurrency_limit', 10)
-    
+
     async def insert(self, subject: E, obj: Any) -> None:
         raise NotImplementedError()
-    
+
     async def query_spo(self, subject: E) -> Any:
         raise NotImplementedError()
-    
+
     async def query_osp(self, obj: Any) -> Set[E]:
         """OSP query - may raise NotImplementedError if supports_osp=False"""
         if not self.supports_osp:
             raise NotImplementedError(f"OSP queries not supported for {self.predicate}")
         raise NotImplementedError()
-    
+
     async def query_pos(self, obj: Any) -> Set[E]:
         """POS query - may raise NotImplementedError if supports_pos=False"""
         if not self.supports_pos:
             raise NotImplementedError(f"POS queries not supported for {self.predicate}")
         raise NotImplementedError()
-    
+
     def audit_performance(self) -> Dict:
         """Return plugin-specific performance metrics."""
         raise NotImplementedError()
@@ -301,7 +301,7 @@ class SpecializedDataStructure:
 }
 ```
 
-**Key Principles**: 
+**Key Principles**:
 - Explicit plugin registration (no magic discovery)
 - Configuration-driven predicate-to-plugin mapping
 - Performance characteristics specified per predicate
@@ -319,11 +319,11 @@ Following CIDSem's constrained ontology principle, new predicates require concre
 ```python
 class PerformanceJustificationRegistry:
     """Track performance justifications per CIDSem discipline."""
-    
-    def justify_predicate(self, predicate: str, plugin: str, 
+
+    def justify_predicate(self, predicate: str, plugin: str,
                          improvement: str, benchmark_data: Dict):
         """Record quantified performance improvement."""
-        
+
         justification = PredicateJustification(
             predicate=predicate,
             plugin_type=plugin,
@@ -331,7 +331,7 @@ class PerformanceJustificationRegistry:
             measurement_data=benchmark_data,      # Actual benchmark results
             approved_by_cidsem=False             # Requires coordination approval
         )
-        
+
         self.justifications[predicate] = justification
 ```
 
@@ -342,20 +342,20 @@ CIDStore actively monitors ontology size to prevent OSP query degradation:
 ```python
 def audit_ontology_discipline(self) -> Dict[str, list[str]]:
     """Audit adherence to CIDSem ontology growth discipline."""
-    
+
     violations = []
     warnings = []
-    
+
     # Check individual justifications
     for predicate in self.predicate_to_cid.keys():
         if predicate not in self.performance_justifications:
             violations.append(f"No performance justification: {predicate}")
-    
+
     # Check overall size constraint
     if len(self._registry) > 200:
         warnings.append(f"Ontology size ({len(self._registry)}) "
                        "approaching performance degradation threshold")
-    
+
     return {'violations': violations, 'warnings': warnings}
 ```
 
@@ -409,34 +409,34 @@ cidsem_config = {
 ```python
 class ConfigurationValidator:
     """Validate predicate configuration against available plugins."""
-    
+
     def __init__(self, plugin_registry: PluginRegistry):
         self.plugin_registry = plugin_registry
-    
+
     def validate_config(self, config: Dict) -> List[str]:
         """Validate configuration and return any errors."""
         errors = []
-        
+
         for predicate, pred_config in config.get('predicates', {}).items():
             # Validate CIDSem format
             if not self._validate_cidsem_format(predicate):
                 errors.append(f"Invalid CIDSem format: {predicate}")
-            
+
             # Validate plugin exists
             plugin_name = pred_config.get('plugin')
             if plugin_name not in self.plugin_registry.list_plugins():
                 errors.append(f"Unknown plugin '{plugin_name}' for predicate {predicate}")
-            
+
             # Validate performance baseline exists
             if 'performance_baseline' not in pred_config:
                 errors.append(f"Missing performance baseline for {predicate}")
-        
+
         # Validate ontology size constraint
         if len(config.get('predicates', {})) > 200:
             errors.append(f"Ontology size ({len(config['predicates'])}) exceeds CIDSem constraint of 200")
-        
+
         return errors
-    
+
     def suggest_plugin(self, predicate: str) -> str:
         """Suggest appropriate plugin based on predicate name patterns."""
         if 'occursAt' in predicate or 'time' in predicate.lower():
@@ -576,16 +576,16 @@ Future versions will support automated ontology synchronization:
 class CIDSemOntologyLoader:
     def sync_from_cidsem_repo(self, repo_path: str):
         """Automatically sync with CIDSem ontology specifications."""
-        
+
         # Parse CIDSem spec files
         ontology_entries = self._parse_cidsem_specs(repo_path)
-        
+
         # Generate optimized plugin configurations
         plugin_configs = self._infer_plugin_mappings(ontology_entries)
-        
+
         # Validate performance justifications
         self._validate_performance_claims(plugin_configs)
-        
+
         # Apply to CIDStore registry
         self._update_predicate_registry(plugin_configs)
 ```
@@ -601,12 +601,12 @@ benchmarks:
     cidsem_complex_statements: 10000
     cidstore_decomposed_triples: 40000  # 4 triples per complex statement
     target_throughput: ">1000 statements/sec"
-    
+
   osp_queries:
     ontology_size: 200
     query_latency: "<10ms"
     fan_out_predicates: "all specialized"
-    
+
   memory_efficiency:
     specialized_vs_generic: ">10x compression"
     index_overhead: "<20% of data"
