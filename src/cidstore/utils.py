@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 
+def sum_ints(a: int, b: int) -> int:
+    """Sum two non-negative integers (used for ZVIC enforcement testing)"""
+    return a + b
+
+
 def assumption(obj: Any, *expected: type) -> bool:
     """Check against multiple possible types"""
     for exp in expected:

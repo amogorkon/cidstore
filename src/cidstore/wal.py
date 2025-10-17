@@ -589,6 +589,60 @@ class WAL:
             f"[WAL.log_delete_value] Deleted value for k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
         )
 
+    async def log_transaction_start(self, time=None):
+        """Log a transaction start boundary to the WAL.
+        
+        Used by CIDStore.begin_transaction() to mark the start of a
+        user-level transaction grouping multiple operations.
+        
+        Args:
+            time: Optional hybrid timestamp (nanos, seq, shard_id). 
+                  If None, generates a new timestamp.
+        """
+        logger.info("[WAL.log_transaction_start] Logging TXN_START")
+        if time is None:
+            time = self._next_hybrid_time()
+        await self.append([
+            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0),
+        ])
+        logger.info(f"[WAL.log_transaction_start] Logged TXN_START at time={time}")
+
+    async def log_transaction_commit(self, time=None):
+        """Log a transaction commit boundary to the WAL.
+        
+        Used by CIDStore.commit() to mark successful completion of a
+        user-level transaction.
+        
+        Args:
+            time: Optional hybrid timestamp (nanos, seq, shard_id).
+                  If None, generates a new timestamp.
+        """
+        logger.info("[WAL.log_transaction_commit] Logging TXN_COMMIT")
+        if time is None:
+            time = self._next_hybrid_time()
+        await self.append([
+            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+        ])
+        logger.info(f"[WAL.log_transaction_commit] Logged TXN_COMMIT at time={time}")
+
+    async def log_transaction_abort(self, time=None):
+        """Log a transaction abort boundary to the WAL.
+        
+        Used by CIDStore.rollback() to mark rollback of a user-level
+        transaction without applying buffered operations.
+        
+        Args:
+            time: Optional hybrid timestamp (nanos, seq, shard_id).
+                  If None, generates a new timestamp.
+        """
+        logger.info("[WAL.log_transaction_abort] Logging TXN_ABORT")
+        if time is None:
+            time = self._next_hybrid_time()
+        await self.append([
+            pack_record(OpVer.NOW, OpType.TXN_ABORT, time, 0, 0, 0, 0),
+        ])
+        logger.info(f"[WAL.log_transaction_abort] Logged TXN_ABORT at time={time}")
+
 
 def pack_record(
     version: OpVer,

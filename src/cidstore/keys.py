@@ -141,3 +141,92 @@ class E(int):
         high = int(arr["high"])
         low = int(arr["low"])
         return cls.from_int((high << 64) | low)
+
+
+def composite_key(subject: E, predicate: E, obj: E) -> E:
+    """Create a composite key for SPO triple storage (Spec 20).
+
+    For non-specialized predicates, we store triples using a composite key
+    derived from (S, P, O). This enables triple storage without requiring
+    a specialized plugin.
+
+    The composite key is computed as:
+        hash(S || P || O)  where || is concatenation
+
+    Args:
+        subject: Subject entity (E)
+        predicate: Predicate entity (E)
+        obj: Object entity (E)
+
+    Returns:
+        E: Composite key for the triple
+
+    Example:
+        >>> s = E.from_str("person:alice")
+        >>> p = E.from_str("rel:knows")
+        >>> o = E.from_str("person:bob")
+        >>> key = composite_key(s, p, o)
+    """
+    # Concatenate the three 128-bit values into a single string
+    # Format: S_high:S_low:P_high:P_low:O_high:O_low
+    composite_str = f"{subject.high}:{subject.low}:{predicate.high}:{predicate.low}:{obj.high}:{obj.low}"
+    # Hash to get deterministic E
+    return E.from_str(composite_str)
+
+
+def composite_value(predicate: E, obj: E) -> E:
+    """Create a composite value encoding P and O for reverse lookup (Spec 20).
+
+    For composite key storage, we need to store (P, O) as the value when
+    using S as the lookup key. This function encodes P and O into a single E.
+
+    Args:
+        predicate: Predicate entity (E)
+        obj: Object entity (E)
+
+    Returns:
+        E: Composite value encoding P and O
+
+    Example:
+        >>> p = E.from_str("rel:knows")
+        >>> o = E.from_str("person:bob")
+        >>> val = composite_value(p, o)
+    """
+    composite_str = f"{predicate.high}:{predicate.low}:{obj.high}:{obj.low}"
+    return E.from_str(composite_str)
+
+
+def decode_composite_value(composite: E) -> tuple[E, E]:
+    """Decode a composite value back into (P, O).
+
+    This is the inverse of composite_value(). Note: this only works
+    if the original predicate and object strings are still in the _kv_store.
+
+    Args:
+        composite: Composite value E
+
+    Returns:
+        tuple[E, E]: (predicate, object)
+
+    Raises:
+        ValueError: If composite value cannot be decoded
+    """
+    # Retrieve original string
+    value_str = _kv_store.get(composite)
+    if value_str is None:
+        raise ValueError(f"Composite value {composite} not found in key-value store")
+
+    # Parse format: P_high:P_low:O_high:O_low
+    parts = value_str.split(":")
+    if len(parts) != 4:
+        raise ValueError(
+            f"Invalid composite value format: expected 4 parts, got {len(parts)}"
+        )
+
+    try:
+        p_high, p_low, o_high, o_low = map(int, parts)
+        predicate = E.from_int((p_high << 64) | p_low)
+        obj = E.from_int((o_high << 64) | o_low)
+        return predicate, obj
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Failed to decode composite value: {e}") from e

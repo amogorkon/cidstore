@@ -487,3 +487,65 @@ async def test_query_pos_convenience_method(store):
     assert isinstance(result, set)
     assert item1 in result
     assert item2 in result
+
+
+async def test_unified_query_spo_pattern(store):
+    """Test unified query() with SPO pattern."""
+    pred = store.predicate_registry.register_cidsem_multivalue("R:usr:friendsWith")
+
+    alice = E.from_str("E:usr:alice")
+    bob = E.from_str("E:usr:bob")
+
+    await pred.insert(alice, bob)
+
+    # Query using unified interface
+    results = []
+    async for s, p, o in store.query(alice, pred.predicate, None):
+        results.append((s, p, o))
+
+    assert len(results) == 1
+    assert results[0] == (alice, pred.predicate, bob)
+
+
+async def test_unified_query_osp_pattern(store):
+    """Test unified query() with OSP pattern."""
+    pred = store.predicate_registry.register_cidsem_counter("R:usr:score")
+
+    alice = E.from_str("E:usr:alice")
+    bob = E.from_str("E:usr:bob")
+
+    await pred.insert(alice, 100)
+    await pred.insert(bob, 100)
+
+    # Query using unified interface
+    results = []
+    async for s, p, o in store.query(None, pred.predicate, 100):
+        results.append((s, p, o))
+
+    assert len(results) == 2
+    subjects = {s for s, p, o in results}
+    assert alice in subjects
+    assert bob in subjects
+
+
+async def test_unified_query_fan_out(store):
+    """Test unified query() with fan-out pattern (?, ?, O)."""
+    pred1 = store.predicate_registry.register_cidsem_multivalue("R:usr:likes")
+    pred2 = store.predicate_registry.register_cidsem_multivalue("R:usr:owns")
+
+    alice = E.from_str("E:usr:alice")
+    bob = E.from_str("E:usr:bob")
+    pizza = E.from_str("E:food:pizza")
+
+    await pred1.insert(alice, pizza)
+    await pred2.insert(bob, pizza)
+
+    # Fan-out query
+    results = []
+    async for s, p, o in store.query(None, None, pizza):
+        results.append((s, p, o))
+
+    assert len(results) == 2
+    subjects = {s for s, p, o in results}
+    assert alice in subjects
+    assert bob in subjects

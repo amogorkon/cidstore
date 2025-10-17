@@ -275,6 +275,113 @@ def tree(store, request):
             k = self._ensure_e(key)
             return self._loop_thread.run_coro(self._store.get_entry(k))
 
+        # Transaction support methods
+        def begin_transaction(self):
+            if inspect.iscoroutinefunction(self._store.begin_transaction):
+                coro = self._store.begin_transaction()
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.begin_transaction()
+
+        def commit(self):
+            if inspect.iscoroutinefunction(self._store.commit):
+                coro = self._store.commit()
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.commit()
+
+        def rollback(self):
+            if inspect.iscoroutinefunction(self._store.rollback):
+                coro = self._store.rollback()
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.rollback()
+
+        def in_transaction(self):
+            return self._store.in_transaction()
+
+        def insert_triple(self, subject, predicate, obj):
+            s = self._ensure_e(subject)
+            p = self._ensure_e(predicate)
+            if inspect.iscoroutinefunction(self._store.insert_triple):
+                coro = self._store.insert_triple(s, p, obj)
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.insert_triple(s, p, obj)
+
+        def delete_triple(self, subject, predicate, obj):
+            s = self._ensure_e(subject)
+            p = self._ensure_e(predicate)
+            if inspect.iscoroutinefunction(self._store.delete_triple):
+                coro = self._store.delete_triple(s, p, obj)
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.delete_triple(s, p, obj)
+
+        def get_triple(self, subject, predicate):
+            s = self._ensure_e(subject)
+            p = self._ensure_e(predicate)
+            if inspect.iscoroutinefunction(self._store.get_triple):
+                coro = self._store.get_triple(s, p)
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.get_triple(s, p)
+
+        def insert_triple_transactional(self, subject, predicate, obj):
+            s = self._ensure_e(subject)
+            p = self._ensure_e(predicate)
+            if inspect.iscoroutinefunction(self._store.insert_triple_transactional):
+                coro = self._store.insert_triple_transactional(s, p, obj)
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.insert_triple_transactional(s, p, obj)
+
+        def delete_triple_transactional(self, subject, predicate, obj):
+            s = self._ensure_e(subject)
+            p = self._ensure_e(predicate)
+            if inspect.iscoroutinefunction(self._store.delete_triple_transactional):
+                coro = self._store.delete_triple_transactional(s, p, obj)
+                return self._loop_thread.run_coro(coro)
+            else:
+                return self._store.delete_triple_transactional(s, p, obj)
+
+        def register_predicate(self, predicate, data_structure_class):
+            """Register a specialized data structure for a predicate.
+            
+            Args:
+                predicate: The predicate (E or convertible)
+                data_structure_class: The DS class (CounterStore or MultiValueSetStore)
+            """
+            from cidstore.predicates import CounterStore, MultiValueSetStore
+            
+            p = self._ensure_e(predicate)
+            
+            # Route to appropriate registry method
+            if data_structure_class == CounterStore or data_structure_class.__name__ == 'CounterStore':
+                return self._store.predicate_registry.register_counter(p)
+            elif data_structure_class == MultiValueSetStore or data_structure_class.__name__ == 'MultiValueSetStore':
+                return self._store.predicate_registry.register_multivalue(p)
+            else:
+                raise ValueError(f"Unsupported data structure class: {data_structure_class}")
+
+        def audit_indices(self):
+            """Audit index consistency (synchronous wrapper)."""
+            from inspect import iscoroutinefunction
+            
+            func = self._store.audit_indices
+            if iscoroutinefunction(func):
+                return self._loop_thread.run_coro(func())
+            else:
+                return func()
+
+        def hot_reload_predicate(self, predicate, new_plugin_type, migrate_data=True):
+            """Hot-reload predicate with new plugin type (synchronous wrapper)."""
+            p = self._ensure_e(predicate)
+            coro = self._store.predicate_registry.hot_reload_predicate(
+                p, new_plugin_type, migrate_data
+            )
+            return self._loop_thread.run_coro(coro)
+
         def close(self):
             from contextlib import suppress
 
