@@ -47,48 +47,48 @@ from typing import Any, Set, Optional
 
 class SpecializedDataStructure:
     """Base class for specialized predicate data structures."""
-    
+
     async def insert(self, subject: E, value: Any) -> None:
         """Insert a triple (subject, predicate, value).
-        
+
         Args:
             subject: The subject entity
             value: The object value (type depends on plugin)
-        
+
         Raises:
             ValueError: If value violates plugin semantics
         """
         raise NotImplementedError
-    
+
     async def query_osp(self, obj: Any) -> Set[E]:
         """Query for subjects matching (?, predicate, obj).
-        
+
         Args:
             obj: The object to search for
-        
+
         Returns:
             Set of subject entities matching the query
         """
         raise NotImplementedError
-    
+
     async def query_pos(self, predicate: E) -> Set[tuple[E, Any]]:
         """Query for all (subject, object) pairs for this predicate.
-        
+
         Args:
             predicate: The predicate to query (usually self.predicate)
-        
+
         Returns:
             Set of (subject, object) tuples
         """
         raise NotImplementedError
-    
+
     async def delete(self, subject: E, obj: Optional[Any] = None) -> int:
         """Delete triples matching (subject, predicate, obj).
-        
+
         Args:
             subject: The subject entity
             obj: Optional object value (None = delete all for subject)
-        
+
         Returns:
             Number of triples deleted
         """
@@ -104,7 +104,7 @@ class MyPlugin(SpecializedDataStructure):
     def __init__(self, predicate: E, store):
         self.predicate = predicate
         self.store = store
-        
+
         # Required indices
         self.spo_index: Dict[E, ValueType] = {}  # Subject → Object(s)
         self.osp_index: Dict[ValueType, Set[E]] = defaultdict(set)  # Object → Subjects
@@ -150,14 +150,14 @@ class MyPlugin(SpecializedDataStructure):
 ```python
 class CounterStore(SpecializedDataStructure):
     """Stores single integer values per subject."""
-    
+
     def __init__(self, predicate: E, store):
         self.predicate = predicate
         self.store = store
         self.spo_index: Dict[E, int] = {}
         self.osp_index: Dict[int, Set[E]] = defaultdict(set)
         self.pos_index: Set[tuple[E, int]] = set()
-    
+
     async def insert(self, subject: E, value: int) -> None:
         """Insert/update a counter value."""
         # Remove old value if exists
@@ -165,36 +165,36 @@ class CounterStore(SpecializedDataStructure):
             old_value = self.spo_index[subject]
             self.osp_index[old_value].discard(subject)
             self.pos_index.discard((subject, old_value))
-        
+
         # Insert new value
         self.spo_index[subject] = value
         self.osp_index[value].add(subject)
         self.pos_index.add((subject, value))
-    
+
     async def query_osp(self, obj: int) -> Set[E]:
         """Find all subjects with this counter value."""
         return self.osp_index.get(obj, set()).copy()
-    
+
     async def query_pos(self, predicate: E) -> Set[tuple[E, int]]:
         """Get all (subject, value) pairs."""
         return self.pos_index.copy()
-    
+
     async def delete(self, subject: E, obj: Optional[int] = None) -> int:
         """Delete counter for subject."""
         if subject not in self.spo_index:
             return 0
-        
+
         old_value = self.spo_index[subject]
-        
+
         # If obj specified, must match
         if obj is not None and old_value != obj:
             return 0
-        
+
         # Remove from all indices
         del self.spo_index[subject]
         self.osp_index[old_value].discard(subject)
         self.pos_index.discard((subject, old_value))
-        
+
         return 1
 ```
 
@@ -210,37 +210,37 @@ class CounterStore(SpecializedDataStructure):
 ```python
 class MultiValueSetStore(SpecializedDataStructure):
     """Stores sets of E values per subject."""
-    
+
     def __init__(self, predicate: E, store):
         self.predicate = predicate
         self.store = store
         self.spo_index: Dict[E, Set[E]] = defaultdict(set)
         self.osp_index: Dict[E, Set[E]] = defaultdict(set)
         self.pos_index: Set[tuple[E, E]] = set()
-    
+
     async def insert(self, subject: E, value: E) -> None:
         """Add a value to the subject's set."""
         if not isinstance(value, E):
             raise ValueError(f"MultiValueSetStore requires E values, got {type(value)}")
-        
+
         # Add to indices (idempotent - set semantics)
         self.spo_index[subject].add(value)
         self.osp_index[value].add(subject)
         self.pos_index.add((subject, value))
-    
+
     async def query_osp(self, obj: E) -> Set[E]:
         """Find all subjects containing this value."""
         return self.osp_index.get(obj, set()).copy()
-    
+
     async def query_pos(self, predicate: E) -> Set[tuple[E, E]]:
         """Get all (subject, value) pairs."""
         return self.pos_index.copy()
-    
+
     async def delete(self, subject: E, obj: Optional[E] = None) -> int:
         """Delete value(s) from subject's set."""
         if subject not in self.spo_index:
             return 0
-        
+
         if obj is None:
             # Delete all values for subject
             values = self.spo_index[subject].copy()
@@ -253,14 +253,14 @@ class MultiValueSetStore(SpecializedDataStructure):
             # Delete specific value
             if obj not in self.spo_index[subject]:
                 return 0
-            
+
             self.spo_index[subject].discard(obj)
             if not self.spo_index[subject]:
                 del self.spo_index[subject]
-            
+
             self.osp_index[obj].discard(subject)
             self.pos_index.discard((subject, obj))
-            
+
             return 1
 ```
 
@@ -286,102 +286,102 @@ from sortedcontainers import SortedDict  # pip install sortedcontainers
 
 class TimestampStore(SpecializedDataStructure):
     """Stores timestamps with efficient range queries."""
-    
+
     def __init__(self, predicate: E, store):
         self.predicate = predicate
         self.store = store
-        
+
         # Standard indices
         self.spo_index: dict[E, int] = {}  # Subject → timestamp
         self.osp_index: dict[int, Set[E]] = defaultdict(set)  # Timestamp → subjects
         self.pos_index: Set[tuple[E, int]] = set()
-        
+
         # Sorted index for range queries
         self.sorted_timestamps = SortedDict()  # Timestamp → Set[E]
-    
+
     async def insert(self, subject: E, timestamp: int) -> None:
         """Insert a timestamp for a subject."""
         if not isinstance(timestamp, int):
             raise ValueError(f"Timestamp must be int, got {type(timestamp)}")
-        
+
         # Remove old timestamp if exists
         if subject in self.spo_index:
             old_ts = self.spo_index[subject]
             self.osp_index[old_ts].discard(subject)
             self.pos_index.discard((subject, old_ts))
-            
+
             # Remove from sorted index
             self.sorted_timestamps[old_ts].discard(subject)
             if not self.sorted_timestamps[old_ts]:
                 del self.sorted_timestamps[old_ts]
-        
+
         # Insert new timestamp
         self.spo_index[subject] = timestamp
         self.osp_index[timestamp].add(subject)
         self.pos_index.add((subject, timestamp))
-        
+
         # Add to sorted index
         if timestamp not in self.sorted_timestamps:
             self.sorted_timestamps[timestamp] = set()
         self.sorted_timestamps[timestamp].add(subject)
-    
+
     async def query_osp(self, timestamp: int) -> Set[E]:
         """Find subjects with exact timestamp."""
         return self.osp_index.get(timestamp, set()).copy()
-    
+
     async def query_range(self, start: int, end: int) -> Set[E]:
         """Find subjects with timestamps in [start, end]."""
         results = set()
         for ts in self.sorted_timestamps.irange(start, end):
             results.update(self.sorted_timestamps[ts])
         return results
-    
+
     async def query_pos(self, predicate: E) -> Set[tuple[E, int]]:
         """Get all (subject, timestamp) pairs."""
         return self.pos_index.copy()
-    
+
     async def delete(self, subject: E, timestamp: Optional[int] = None) -> int:
         """Delete timestamp for subject."""
         if subject not in self.spo_index:
             return 0
-        
+
         old_ts = self.spo_index[subject]
-        
+
         # If timestamp specified, must match
         if timestamp is not None and old_ts != timestamp:
             return 0
-        
+
         # Remove from all indices
         del self.spo_index[subject]
         self.osp_index[old_ts].discard(subject)
         self.pos_index.discard((subject, old_ts))
-        
+
         # Remove from sorted index
         self.sorted_timestamps[old_ts].discard(subject)
         if not self.sorted_timestamps[old_ts]:
             del self.sorted_timestamps[old_ts]
-        
+
         return 1
-    
+
     async def audit_indices(self) -> dict:
         """Verify index consistency."""
         errors = []
-        
+
         # Verify SPO ↔ POS
         spo_pairs = {(s, v) for s, v in self.spo_index.items()}
         if spo_pairs != self.pos_index:
             errors.append("SPO/POS mismatch")
-        
+
         # Verify OSP ↔ POS
         osp_pairs = {(s, ts) for ts, subjects in self.osp_index.items() for s in subjects}
         if osp_pairs != self.pos_index:
             errors.append("OSP/POS mismatch")
-        
+
         # Verify sorted index
         sorted_pairs = {(s, ts) for ts, subjects in self.sorted_timestamps.items() for s in subjects}
         if sorted_pairs != self.pos_index:
             errors.append("Sorted/POS mismatch")
-        
+
         return {
             'consistent': len(errors) == 0,
             'errors': errors,
@@ -433,16 +433,16 @@ class LazyOSPStore(SpecializedDataStructure):
         self.spo_index = {}
         self.osp_index = None  # Build on first query
         self._osp_dirty = True
-    
+
     async def insert(self, subject, value):
         self.spo_index[subject] = value
         self._osp_dirty = True
-    
+
     async def query_osp(self, obj):
         if self._osp_dirty:
             self._rebuild_osp()
         return self.osp_index.get(obj, set())
-    
+
     def _rebuild_osp(self):
         self.osp_index = defaultdict(set)
         for s, v in self.spo_index.items():
@@ -460,7 +460,7 @@ async def insert_batch(self, items: list[tuple[E, Any]]) -> None:
         self.spo_index[subject] = value
         self.osp_index[value].add(subject)
         self.pos_index.add((subject, value))
-    
+
     # Single WAL write for entire batch
     if self.store._wal:
         await self.store._wal.write_batch([
@@ -475,35 +475,35 @@ from roaring import RoaringBitmap  # pip install pyroaring
 
 class CompressedMultiValueStore(SpecializedDataStructure):
     """Uses RoaringBitmaps for memory-efficient large sets."""
-    
+
     def __init__(self, predicate, store):
         self.predicate = predicate
         self.store = store
-        
+
         # Map E → int for bitmap storage
         self.e_to_int = {}
         self.int_to_e = {}
         self.next_id = 0
-        
+
         # Compressed indices
         self.spo_index: dict[E, RoaringBitmap] = {}
         self.osp_index: dict[E, RoaringBitmap] = {}
-    
+
     def _get_id(self, e: E) -> int:
         if e not in self.e_to_int:
             self.e_to_int[e] = self.next_id
             self.int_to_e[self.next_id] = e
             self.next_id += 1
         return self.e_to_int[e]
-    
+
     async def insert(self, subject: E, value: E) -> None:
         s_id = self._get_id(subject)
         v_id = self._get_id(value)
-        
+
         if subject not in self.spo_index:
             self.spo_index[subject] = RoaringBitmap()
         self.spo_index[subject].add(v_id)
-        
+
         if value not in self.osp_index:
             self.osp_index[value] = RoaringBitmap()
         self.osp_index[value].add(s_id)
@@ -531,32 +531,32 @@ async def test_my_plugin_insert(store):
     """Test basic insert operation."""
     pred = E.from_str("R:test:pred")
     store.predicate_registry.register(pred, MyCustomPlugin)
-    
+
     subject = E.from_str("E:test:subject")
     value = 42
-    
+
     await store.insert_triple(subject, pred, value)
     result = await store.get_triple(subject, pred)
-    
+
     assert result == value
 
 async def test_my_plugin_osp_query(store):
     """Test reverse (OSP) queries."""
     pred = E.from_str("R:test:pred")
     store.predicate_registry.register(pred, MyCustomPlugin)
-    
+
     # Insert test data
     s1 = E.from_str("E:test:subject1")
     s2 = E.from_str("E:test:subject2")
     value = 42
-    
+
     await store.insert_triple(s1, pred, value)
     await store.insert_triple(s2, pred, value)
-    
+
     # Query
     plugin = store.predicate_registry.get(pred)
     subjects = await plugin.query_osp(value)
-    
+
     assert s1 in subjects
     assert s2 in subjects
 
@@ -564,15 +564,15 @@ async def test_my_plugin_delete(store):
     """Test deletion."""
     pred = E.from_str("R:test:pred")
     store.predicate_registry.register(pred, MyCustomPlugin)
-    
+
     subject = E.from_str("E:test:subject")
     value = 42
-    
+
     await store.insert_triple(subject, pred, value)
-    
+
     plugin = store.predicate_registry.get(pred)
     deleted = await plugin.delete(subject, value)
-    
+
     assert deleted == 1
     assert subject not in plugin.spo_index
 
@@ -580,15 +580,15 @@ async def test_my_plugin_audit_indices(store):
     """Test index consistency after operations."""
     pred = E.from_str("R:test:pred")
     store.predicate_registry.register(pred, MyCustomPlugin)
-    
+
     # Insert, update, delete operations
     subject = E.from_str("E:test:subject")
     await store.insert_triple(subject, pred, 1)
     await store.insert_triple(subject, pred, 2)  # Update
-    
+
     plugin = store.predicate_registry.get(pred)
     result = await plugin.audit_indices()
-    
+
     assert result['consistent'] is True
     assert len(result['errors']) == 0
 ```
@@ -698,15 +698,15 @@ class MyCustomPlugin(SpecializedDataStructure):
     async def migrate_from(cls, old_plugin: SpecializedDataStructure, predicate: E, store):
         """Migrate data from another plugin type."""
         new_plugin = cls(predicate, store)
-        
+
         # Access old plugin's data
         for subject, value in old_plugin.spo_index.items():
             # Transform value to new plugin's format
             transformed_value = cls._transform_value(value)
             await new_plugin.insert(subject, transformed_value)
-        
+
         return new_plugin
-    
+
     @staticmethod
     def _transform_value(value: Any) -> Any:
         """Transform value from old format to new format."""
@@ -766,7 +766,7 @@ class InstrumentedPlugin(SpecializedDataStructure):
             'queries': 0,
             'deletes': 0
         }
-    
+
     async def insert(self, subject, value):
         start = time.time()
         await super().insert(subject, value)

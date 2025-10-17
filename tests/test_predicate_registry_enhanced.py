@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 from cidstore.keys import E
-from cidstore.predicates import CounterStore, MultiValueSetStore, PredicateRegistry
+from cidstore.predicates import CounterStore, PredicateRegistry
 
 
 @pytest.mark.asyncio

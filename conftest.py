@@ -347,27 +347,35 @@ def tree(store, request):
 
         def register_predicate(self, predicate, data_structure_class):
             """Register a specialized data structure for a predicate.
-            
+
             Args:
                 predicate: The predicate (E or convertible)
                 data_structure_class: The DS class (CounterStore or MultiValueSetStore)
             """
             from cidstore.predicates import CounterStore, MultiValueSetStore
-            
+
             p = self._ensure_e(predicate)
-            
+
             # Route to appropriate registry method
-            if data_structure_class == CounterStore or data_structure_class.__name__ == 'CounterStore':
+            if (
+                data_structure_class == CounterStore
+                or data_structure_class.__name__ == "CounterStore"
+            ):
                 return self._store.predicate_registry.register_counter(p)
-            elif data_structure_class == MultiValueSetStore or data_structure_class.__name__ == 'MultiValueSetStore':
+            elif (
+                data_structure_class == MultiValueSetStore
+                or data_structure_class.__name__ == "MultiValueSetStore"
+            ):
                 return self._store.predicate_registry.register_multivalue(p)
             else:
-                raise ValueError(f"Unsupported data structure class: {data_structure_class}")
+                raise ValueError(
+                    f"Unsupported data structure class: {data_structure_class}"
+                )
 
         def audit_indices(self):
             """Audit index consistency (synchronous wrapper)."""
             from inspect import iscoroutinefunction
-            
+
             func = self._store.audit_indices
             if iscoroutinefunction(func):
                 return self._loop_thread.run_coro(func())

@@ -9,8 +9,9 @@ Tests:
 """
 
 import pytest
-from cidstore.keys import E, composite_key, composite_value, decode_composite_value
+
 from cidstore.exceptions import InvalidTripleError
+from cidstore.keys import E, composite_key, composite_value, decode_composite_value
 
 
 def test_composite_key_unique():
@@ -41,7 +42,7 @@ def test_composite_key_components():
     o = E.from_str("person:bob")
 
     key_spo = composite_key(s, p, o)
-    
+
     # Different subject
     s2 = E.from_str("person:dave")
     key_s2po = composite_key(s2, p, o)
@@ -64,10 +65,10 @@ def test_composite_value_encode():
     o = E.from_str("person:bob")
 
     value = composite_value(p, o)
-    
+
     # Value should be an E
     assert isinstance(value, E)
-    
+
     # Different predicates/objects should produce different values
     p2 = E.from_str("rel:likes")
     value2 = composite_value(p2, o)
@@ -100,7 +101,7 @@ async def test_insert_triple_composite_key(store):
     # Verify triple was stored using composite key
     key = composite_key(s, p, o)
     value = composite_value(p, o)
-    
+
     # Should be able to retrieve via composite key
     result = await store.get(key)
     assert len(result) > 0
@@ -132,10 +133,10 @@ async def test_insert_triple_non_e_object(store):
     """Test insert_triple converts string objects to E."""
     s = E.from_str("person:alice")
     p = E.from_str("rel:name")
-    
+
     # String object should be converted via E.from_str
     await store.insert_triple(s, p, "Alice Smith")
-    
+
     # Should be stored with converted object
     key = composite_key(s, p, E.from_str("Alice Smith"))
     result = await store.get(key)
@@ -147,11 +148,11 @@ async def test_insert_triple_numeric_object(store):
     """Test insert_triple converts numeric objects to E."""
     s = E.from_str("person:alice")
     p = E.from_str("attr:age")
-    
+
     # Numeric object should be converted via E.from_int
     # This should work without error (conversion happens inside insert_triple)
     await store.insert_triple(s, p, 42)
-    
+
     # Verify insertion succeeded - the exact key depends on internal conversion
     # Just verify no exception was raised
     assert True  # Test passes if we reach here without exception
@@ -194,10 +195,10 @@ async def test_composite_key_fallback_specialized_predicate(store):
     p = store.predicate_registry.predicate_to_cid[p_term]
 
     s = E.from_str("person:alice")
-    
+
     # Insert via specialized predicate (should use CounterStore, not composite keys)
     await store.insert_triple(s, p, 5)
-    
+
     # Query via specialized predicate directly through the counter
     result = await counter.query_spo(s)
     assert result == 5  # Should retrieve via CounterStore
@@ -205,4 +206,6 @@ async def test_composite_key_fallback_specialized_predicate(store):
     # Composite key should NOT have been used
     key = composite_key(s, p, E.from_int(5))
     composite_result = await store.get(key)
-    assert len(composite_result) == 0  # Should be empty - used specialized store instead
+    assert (
+        len(composite_result) == 0
+    )  # Should be empty - used specialized store instead

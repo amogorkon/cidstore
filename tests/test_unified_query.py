@@ -6,7 +6,6 @@ Tests all query patterns: SPO, OSP, POS, S??, ??O, and dispatch to plugins.
 import pytest
 
 from cidstore.keys import E
-from cidstore.predicates import PredicateRegistry
 
 
 @pytest.mark.asyncio

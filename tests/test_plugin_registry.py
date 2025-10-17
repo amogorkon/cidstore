@@ -7,7 +7,11 @@ import pytest
 
 from cidstore.keys import E
 from cidstore.plugins import PluginRegistry, create_default_registry
-from cidstore.predicates import CounterStore, MultiValueSetStore, SpecializedDataStructure
+from cidstore.predicates import (
+    CounterStore,
+    MultiValueSetStore,
+    SpecializedDataStructure,
+)
 
 
 class MockPlugin(SpecializedDataStructure):

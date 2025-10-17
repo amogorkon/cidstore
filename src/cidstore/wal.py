@@ -591,12 +591,12 @@ class WAL:
 
     async def log_transaction_start(self, time=None):
         """Log a transaction start boundary to the WAL.
-        
+
         Used by CIDStore.begin_transaction() to mark the start of a
         user-level transaction grouping multiple operations.
-        
+
         Args:
-            time: Optional hybrid timestamp (nanos, seq, shard_id). 
+            time: Optional hybrid timestamp (nanos, seq, shard_id).
                   If None, generates a new timestamp.
         """
         logger.info("[WAL.log_transaction_start] Logging TXN_START")
@@ -609,10 +609,10 @@ class WAL:
 
     async def log_transaction_commit(self, time=None):
         """Log a transaction commit boundary to the WAL.
-        
+
         Used by CIDStore.commit() to mark successful completion of a
         user-level transaction.
-        
+
         Args:
             time: Optional hybrid timestamp (nanos, seq, shard_id).
                   If None, generates a new timestamp.
@@ -627,10 +627,10 @@ class WAL:
 
     async def log_transaction_abort(self, time=None):
         """Log a transaction abort boundary to the WAL.
-        
+
         Used by CIDStore.rollback() to mark rollback of a user-level
         transaction without applying buffered operations.
-        
+
         Args:
             time: Optional hybrid timestamp (nanos, seq, shard_id).
                   If None, generates a new timestamp.
