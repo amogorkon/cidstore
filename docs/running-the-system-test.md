@@ -467,10 +467,10 @@ on: [push, pull_request]
 jobs:
   system-test:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Run CIDStore system test
         run: |
           cd tests/cidsem_mockup

@@ -718,20 +718,35 @@ class PredicateRegistry:
         new_type = type(new_ds).__name__
 
         try:
-            if old_type == "CounterStore" and new_type == "CounterStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
+            if (
+                old_type == "CounterStore"
+                and new_type == "CounterStore"
+                and hasattr(old_ds, "spo_index")
+                and hasattr(new_ds, "insert")
+            ):
                 # Direct copy: Subject → int
                 for subject, value in old_ds.spo_index.items():  # type: ignore
                     await new_ds.insert(subject, value)
                     stats["migrated"] += 1
 
-            elif old_type == "MultiValueSetStore" and new_type == "MultiValueSetStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
+            elif (
+                old_type == "MultiValueSetStore"
+                and new_type == "MultiValueSetStore"
+                and hasattr(old_ds, "spo_index")
+                and hasattr(new_ds, "insert")
+            ):
                 # Direct copy: Subject → Set[E]
                 for subject, obj_set in old_ds.spo_index.items():  # type: ignore
                     for obj in obj_set:
                         await new_ds.insert(subject, obj)
                         stats["migrated"] += 1
 
-            elif old_type == "CounterStore" and new_type == "MultiValueSetStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
+            elif (
+                old_type == "CounterStore"
+                and new_type == "MultiValueSetStore"
+                and hasattr(old_ds, "spo_index")
+                and hasattr(new_ds, "insert")
+            ):
                 # Convert counter to multivalue: treat int as object E
                 for subject, value in old_ds.spo_index.items():  # type: ignore
                     # Store the count as a synthetic E value
@@ -740,7 +755,12 @@ class PredicateRegistry:
                     await new_ds.insert(subject, obj_e)
                     stats["migrated"] += 1
 
-            elif old_type == "MultiValueSetStore" and new_type == "CounterStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
+            elif (
+                old_type == "MultiValueSetStore"
+                and new_type == "CounterStore"
+                and hasattr(old_ds, "spo_index")
+                and hasattr(new_ds, "insert")
+            ):
                 # Convert multivalue to counter: count set size
                 for subject, obj_set in old_ds.spo_index.items():  # type: ignore
                     count = len(obj_set)
