@@ -3,6 +3,8 @@
   "reportUnknownMemberType": false,
   "reportGeneralTypeIssues": false,
   "reportOptionalMemberAccess": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
   "exclude": [
     "tests",
     "__pycache__",

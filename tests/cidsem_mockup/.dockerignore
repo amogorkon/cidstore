@@ -1,0 +1,21 @@
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Ignore editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Ignore git
+.git/
+.gitignore
+
+# Ignore documentation
+*.md
+!README.md

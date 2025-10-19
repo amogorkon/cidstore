@@ -1,11 +1,18 @@
-"""store.py - Main CIDStore class with proper extendible hashing implementation"""
+"""store.py - Main CIDStore class with proper extendible hashing implementation
+
+Note: This module interacts heavily with h5py's dynamic types (Group/Dataset/Datatype)
+which can confuse static analyzers. To reduce editor/CI noise we add file-level
+type checker directives. This does not affect runtime behavior.
+"""
+
+# pyright: reportUnknownMemberType=false, reportGeneralTypeIssues=false, reportOptionalMemberAccess=false
 
 from __future__ import annotations
 
 import asyncio
 import threading
 from asyncio import Task, create_task
-from typing import Any
+from typing import Any, Set, cast
 
 import numpy as np
 from h5py import Dataset, Group
@@ -32,6 +39,13 @@ from .utils import assumption
 from .wal import WAL
 
 logger = get_logger(__name__)
+
+
+# Helper to cast h5py objects to Group for type checkers
+# h5py's __getitem__ returns Group | Dataset | Datatype which confuses type checkers
+def _group(obj: Any) -> Group:
+    """Cast h5py object to Group for type checker. Runtime is unchanged."""
+    return cast(Group, obj)
 
 
 class CIDStore:
@@ -1160,7 +1174,6 @@ class CIDStore:
         try:
             # Ensure we have the bucket_name in scope
             bucket_name, _ = self._bucket_name_and_id(key.high, key.low)
-            seen = False
             for _ in range(100):
                 try:
                     with self.hdf._mem_index_lock:
@@ -1169,7 +1182,6 @@ class CIDStore:
                             int(key.high),
                             int(key.low),
                         ) in self.hdf._mem_index:
-                            seen = True
                             break
                 except Exception:
                     # ignore lock/inspection failures and retry
@@ -1541,10 +1553,9 @@ class CIDStore:
         for s, p, o in triples:
             try:
                 # Validate (if not atomic, do per-triple validation)
-                if not atomic:
-                    if not isinstance(s, E) or not isinstance(p, E):
-                        stats["failed"] += 1
-                        continue
+                if not atomic and (not isinstance(s, E) or not isinstance(p, E)):
+                    stats["failed"] += 1
+                    continue
 
                 ds = self.predicate_registry.get(p)
                 if ds is not None:
@@ -1776,11 +1787,10 @@ class CIDStore:
                 # (?, P, O) - reverse lookup: get all subjects
                 case (False, True, True):
                     ds = self.predicate_registry.get(predicate)
-                    if ds is not None:
-                        if ds.supports_osp or ds.supports_pos:
-                            subjects = await ds.query_osp(obj)
-                            for s in subjects:
-                                yield (s, predicate, obj)
+                    if ds is not None and (ds.supports_osp or ds.supports_pos):
+                        subjects = await ds.query_osp(obj)
+                        for s in subjects:
+                            yield (s, predicate, obj)
 
                 # (S, ?, ?) - get all predicates+objects for subject
                 case (True, False, False):

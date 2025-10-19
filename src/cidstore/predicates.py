@@ -33,8 +33,8 @@ PREDICATE_LIMIT = 200
 # CIDSem term validation regex: kind:namespace:label
 # - kind: E, R, EV, L, C (uppercase letters only)
 # - namespace: alphanumeric, underscore, hyphen
-# - label: alphanumeric, underscore, hyphen
-CIDSEM_TERM_PATTERN = re.compile(r"^(E|R|EV|L|C):([a-zA-Z0-9_-]+):([a-zA-Z0-9_-]+)$")
+# - label: alphanumeric, underscore, hyphen, colon (for hierarchical labels)
+CIDSEM_TERM_PATTERN = re.compile(r"^(E|R|EV|L|C):([a-zA-Z0-9_-]+):([a-zA-Z0-9_:-]+)$")
 
 
 class SpecializedDataStructure:
@@ -112,6 +112,8 @@ class CounterStore(SpecializedDataStructure):
         self.pos_index: Dict[int, Set[E]] = {}
 
         # Performance tracking
+        self._insert_count = 0
+        self._query_count = 0
         self._total_increments = 0
 
     async def insert(self, subject: E, value: int) -> None:
@@ -135,9 +137,9 @@ class CounterStore(SpecializedDataStructure):
                     del self.pos_index[old]
 
         # Add new value to all indices
-        self.spo_index[subject] = int(value)
-        self.osp_index.setdefault(int(value), set()).add(subject)
-        self.pos_index.setdefault(int(value), set()).add(subject)
+        self.spo_index[subject] = value
+        self.osp_index.setdefault(value, set()).add(subject)
+        self.pos_index.setdefault(value, set()).add(subject)
 
     async def delete(self, subject: E, obj: Any) -> bool:
         """Delete counter value for subject.
@@ -166,15 +168,13 @@ class CounterStore(SpecializedDataStructure):
         del self.spo_index[subject]
 
         # Remove from OSP index
-        osp_set = self.osp_index.get(current_value)
-        if osp_set:
+        if osp_set := self.osp_index.get(current_value):
             osp_set.discard(subject)
             if not osp_set:
                 del self.osp_index[current_value]
 
         # Remove from POS index
-        pos_set = self.pos_index.get(current_value)
-        if pos_set:
+        if pos_set := self.pos_index.get(current_value):
             pos_set.discard(subject)
             if not pos_set:
                 del self.pos_index[current_value]
@@ -205,7 +205,6 @@ class CounterStore(SpecializedDataStructure):
 
     def audit_performance(self) -> Dict[str, Any]:
         """Return performance metrics for CounterStore."""
-        total_values = sum(len(s) for s in self.osp_index.values())
         avg_value = (
             sum(self.spo_index.values()) / len(self.spo_index) if self.spo_index else 0
         )
@@ -243,6 +242,10 @@ class MultiValueSetStore(SpecializedDataStructure):
         # POS index: Object -> Set[Subject] (same as OSP for single predicate)
         self.pos_index: Dict[E, Set[E]] = {}
 
+        # Performance tracking
+        self._insert_count = 0
+        self._query_count = 0
+
     async def insert(self, subject: E, obj: E) -> None:
         self._insert_count += 1
 
@@ -279,15 +282,13 @@ class MultiValueSetStore(SpecializedDataStructure):
             del self.spo_index[subject]
 
         # Remove from OSP index
-        osp_set = self.osp_index.get(obj)
-        if osp_set:
+        if osp_set := self.osp_index.get(obj):
             osp_set.discard(subject)
             if not osp_set:
                 del self.osp_index[obj]
 
         # Remove from POS index
-        pos_set = self.pos_index.get(obj)
-        if pos_set:
+        if pos_set := self.pos_index.get(obj):
             pos_set.discard(subject)
             if not pos_set:
                 del self.pos_index[obj]
@@ -300,16 +301,12 @@ class MultiValueSetStore(SpecializedDataStructure):
 
     async def query_osp(self, obj: Any) -> Set[E]:
         self._query_count += 1
-        if not isinstance(obj, E):
-            return set()
-        return self.osp_index.get(obj, set()).copy()
+        return self.osp_index.get(obj, set()).copy() if isinstance(obj, E) else set()
 
     async def query_pos(self, obj: Any) -> Set[E]:
         """POS query: Which subjects have this predicate+object combination?"""
         self._query_count += 1
-        if not isinstance(obj, E):
-            return set()
-        return self.pos_index.get(obj, set()).copy()
+        return self.pos_index.get(obj, set()).copy() if isinstance(obj, E) else set()
 
     def audit_performance(self) -> Dict[str, Any]:
         """Return performance metrics for MultiValueSetStore."""
@@ -584,16 +581,16 @@ class PredicateRegistry:
         Returns:
             Dictionary with 'violations' and 'warnings' lists
         """
-        violations = []
+        # Check for performance justification
+        violations = [
+            f"No performance justification: {predicate}"
+            for predicate in self.predicate_to_cid.keys()
+            if predicate not in self.performance_justifications
+        ]
         warnings = []
 
-        for predicate in self.predicate_to_cid.keys():
-            # Check for performance justification
-            if predicate not in self.performance_justifications:
-                violations.append(f"No performance justification: {predicate}")
-
         # Check ontology size (CIDSem discipline: keep constrained)
-        if len(self._registry) > 200:
+        if len(self._registry) >= 200:
             warnings.append(
                 f"Ontology size ({len(self._registry)}) "
                 "approaching performance degradation threshold"
@@ -686,8 +683,7 @@ class PredicateRegistry:
             del self._semaphores[predicate]
 
         # Clean up CIDSem mappings
-        predicate_name = self.cid_to_predicate.pop(predicate, None)
-        if predicate_name:
+        if predicate_name := self.cid_to_predicate.pop(predicate, None):
             self.predicate_to_cid.pop(predicate_name, None)
             self.performance_justifications.pop(predicate_name, None)
 
@@ -722,38 +718,34 @@ class PredicateRegistry:
         new_type = type(new_ds).__name__
 
         try:
-            if old_type == "CounterStore" and new_type == "CounterStore":
+            if old_type == "CounterStore" and new_type == "CounterStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
                 # Direct copy: Subject → int
-                if hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
-                    for subject, value in old_ds.spo_index.items():  # type: ignore
-                        await new_ds.insert(subject, value)
-                        stats["migrated"] += 1
+                for subject, value in old_ds.spo_index.items():  # type: ignore
+                    await new_ds.insert(subject, value)
+                    stats["migrated"] += 1
 
-            elif old_type == "MultiValueSetStore" and new_type == "MultiValueSetStore":
+            elif old_type == "MultiValueSetStore" and new_type == "MultiValueSetStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
                 # Direct copy: Subject → Set[E]
-                if hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
-                    for subject, obj_set in old_ds.spo_index.items():  # type: ignore
-                        for obj in obj_set:
-                            await new_ds.insert(subject, obj)
-                            stats["migrated"] += 1
+                for subject, obj_set in old_ds.spo_index.items():  # type: ignore
+                    for obj in obj_set:
+                        await new_ds.insert(subject, obj)
+                        stats["migrated"] += 1
 
-            elif old_type == "CounterStore" and new_type == "MultiValueSetStore":
+            elif old_type == "CounterStore" and new_type == "MultiValueSetStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
                 # Convert counter to multivalue: treat int as object E
-                if hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
-                    for subject, value in old_ds.spo_index.items():  # type: ignore
-                        # Store the count as a synthetic E value
-                        # This is lossy but best-effort migration
-                        obj_e = E.from_str(f"E:migration:count_{value}")
-                        await new_ds.insert(subject, obj_e)
-                        stats["migrated"] += 1
+                for subject, value in old_ds.spo_index.items():  # type: ignore
+                    # Store the count as a synthetic E value
+                    # This is lossy but best-effort migration
+                    obj_e = E.from_str(f"E:migration:count_{value}")
+                    await new_ds.insert(subject, obj_e)
+                    stats["migrated"] += 1
 
-            elif old_type == "MultiValueSetStore" and new_type == "CounterStore":
+            elif old_type == "MultiValueSetStore" and new_type == "CounterStore" and hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
                 # Convert multivalue to counter: count set size
-                if hasattr(old_ds, "spo_index") and hasattr(new_ds, "insert"):
-                    for subject, obj_set in old_ds.spo_index.items():  # type: ignore
-                        count = len(obj_set)
-                        await new_ds.insert(subject, count)
-                        stats["migrated"] += 1
+                for subject, obj_set in old_ds.spo_index.items():  # type: ignore
+                    count = len(obj_set)
+                    await new_ds.insert(subject, count)
+                    stats["migrated"] += 1
 
             else:
                 # Unsupported migration path

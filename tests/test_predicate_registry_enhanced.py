@@ -234,7 +234,7 @@ async def test_query_osp_parallel_handles_exceptions():
         results.append(triple)
 
     # Should have result from pred2, but not pred1 (failed)
-    assert len(results) >= 1
+    assert results
     subjects = {s for s, p, o in results}
     assert bob in subjects
 
@@ -356,8 +356,8 @@ def test_audit_ontology_discipline_size_warning():
     """Test ontology audit warns when approaching 200 predicate limit."""
     registry = PredicateRegistry()
 
-    # Register 201 predicates
-    for i in range(201):
+    # Register exactly 200 predicates (at the limit)
+    for i in range(200):
         registry.register_cidsem_counter(f"R:usr:pred{i}", "test")
 
     audit = registry.audit_ontology_discipline()

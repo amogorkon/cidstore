@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # CIDStore service
+  cidstore:
+    build:
+      context: ../../
+      dockerfile: Dockerfile
+    container_name: cidstore
+    ports:
+      - "8000:8000"
+    environment:
+      - CIDSTORE_PORT=8000
+      - CIDSTORE_HDF5_PATH=/data/cidstore.h5
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - cidstore-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - cidstore-network
+
+  # CIDSem mockup test
+  cidsem-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cidsem-test
+    depends_on:
+      cidstore:
+        condition: service_healthy
+    environment:
+      - CIDSTORE_URL=http://cidstore:8000
+    networks:
+      - cidstore-network
+
+volumes:
+  cidstore-data:
+
+networks:
+  cidstore-network:
+    driver: bridge
