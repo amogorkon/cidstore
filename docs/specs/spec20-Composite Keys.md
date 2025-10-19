@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Combine two 128‑bit content identifiers (CIDs) into a single 128‑bit composite key with the following properties:
+Combine two 256-bit content identifiers (CIDs) into a single 256-bit composite key with the following properties:
 
 | Property           | Description                                                                 |
 |--------------------|-----------------------------------------------------------------------------|
@@ -97,7 +97,7 @@ def create_composite_key(a: E, b: E, r: int) -> E:
 | Avalanche      | Mean ≈ 64 bits, stddev ≈ 5.66 (near theoretical optimum)               |
 | Order          | Non-commutative: composite(a, b) ≠ composite(b, a)                     |
 | Non-reversible | Cannot recover a or b from output                                      |
-| Collisions     | As with any 256→128 bit hash, collisions are possible but rare         |
+| Collisions     | As with any 512→256 bit hash, collisions are possible but rare         |
 | Security       | Not for cryptographic secrecy, only for indexing/distribution          |
 | Rotation       | Rotation parameter can be chosen freely; does not affect diffusion     |
 | Optimality     | Diffusion is closer to theoretical optimum than truncated SHA-256      |
@@ -106,7 +106,7 @@ def create_composite_key(a: E, b: E, r: int) -> E:
 
 ## Summary
 
-- **Purpose:** Combine two 128-bit CIDs into a single, well-diffused, order-sensitive, non-reversible 128-bit key.
+- **Purpose:** Combine two 256-bit CIDs into a single, well-diffused, order-sensitive, non-reversible 256-bit key.
 - **Design:** Mix, combine, rotate, mask, and mix again for optimal diffusion and uniformity.
 - **Avalanche:** Empirical results: mean ≈64, stddev ≈5.66; closer to theoretical optimum than truncated SHA-256.
 - **Rotation:** The rotation parameter does not affect avalanche/diffusion and can be chosen for other reasons.

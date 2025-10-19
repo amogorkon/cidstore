@@ -1,6 +1,6 @@
 # CIDStore
 
-CIDStore is a high-performance, disk-backed B+Tree implementation designed as a backend for triplestores. It efficiently maps 128-bit composite keys to variable-sized sets of 128-bit values, supporting massive-scale many-to-many relationships with high throughput and low latency.
+CIDStore is a high-performance, disk-backed B+Tree implementation designed as a backend for triplestores. It efficiently maps 256-bit composite keys (full SHA-256 CIDs) to variable-sized sets of 256-bit values, supporting massive-scale many-to-many relationships with high throughput and low latency.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ interpreter, so repeated CI runs are faster.
 
 ## Key Characteristics
 
-- **Keys**: Immutable 128-bit identifiers derived from SHA3 hashes or composite triplestore logic.
+- **Keys**: Immutable 256-bit Content Identifiers (CIDs) from full SHA-256 hashes, stored as 4×64-bit components for maximum cryptographic strength.
 - **Values**: Stored in contiguous, compressed datasets for efficient retrieval.
 - **Performance** (with Python 3.13 optimizations):
   - Insert throughput: >1M ops/sec (>3M with free-threading).

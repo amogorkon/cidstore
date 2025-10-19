@@ -1,6 +1,6 @@
 # 256-bit CID Migration Status
 
-**Date:** October 19, 2025  
+**Date:** October 19, 2025
 **Migration Goal:** Upgrade from 128-bit to 256-bit CIDs (keys and values)
 
 ## ✅ Completed Components
@@ -23,7 +23,7 @@
 - ✅ `_apply_insert_sync()` stores entries with 4-component keys
 - ✅ Bucket entries properly store 256-bit keys
 
-### Store Layer  
+### Store Layer
 - ✅ `insert()` works with 256-bit keys/values
 - ✅ `get()` retrieves values using 256-bit keys
 - ✅ `delete_value()` matches entries using all 4 key components
@@ -41,9 +41,9 @@
 ### WAL Replay Ordering (Not 256-bit Related)
 **Issue:** After DELETE operations, subsequent `get()` calls trigger WAL replay which re-applies earlier INSERT records, causing deleted values to reappear.
 
-**Impact:** 
+**Impact:**
 - test_cidstore_delete fails
-- test_overwrite fails  
+- test_overwrite fails
 - Multivalue operations may show stale data
 
 **Root Cause:** WAL replay logic doesn't properly handle DELETE operations during snapshot replay. The DELETE is logged correctly, the bucket is updated correctly, and mem_index is cleared, but WAL replay re-inserts the value.
@@ -92,7 +92,7 @@
 5. **Run full test suite:** Address any remaining 256-bit compatibility issues
 6. **Performance testing:** Verify no performance regressions with larger record size
 
-### Low Priority  
+### Low Priority
 7. **Documentation:** Update API docs to reflect 256-bit support
 8. **Migration guide:** Document upgrade path for existing databases
 

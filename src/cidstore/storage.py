@@ -1162,13 +1162,26 @@ class Storage:
         assert assumption(bucket_ds, Dataset)
         return bucket_ds
 
-    def find_entry_in_bucket_sync(self, bucket_name: str, key_high: int, key_high_mid: int, key_low_mid: int, key_low: int):
+    def find_entry_in_bucket_sync(
+        self,
+        bucket_name: str,
+        key_high: int,
+        key_high_mid: int,
+        key_low_mid: int,
+        key_low: int,
+    ):
         """Find and return a (copied) entry in the given bucket or None."""
         # First consult the worker-local in-memory index for deterministic
         # in-process visibility of recent writes executed on the worker.
         try:
             with self._mem_index_lock:
-                m = self._mem_index.get((bucket_name, int(key_high), int(key_high_mid), int(key_low_mid), int(key_low)))
+                m = self._mem_index.get((
+                    bucket_name,
+                    int(key_high),
+                    int(key_high_mid),
+                    int(key_low_mid),
+                    int(key_low),
+                ))
                 if m is not None:
                     try:
                         logger.debug(
@@ -1379,7 +1392,12 @@ class Storage:
 
                 # Each element in 'raw' is structured with fields high, high_mid, low_mid, low
                 decoded = [
-                    E(int(v["high"]), int(v["high_mid"]), int(v["low_mid"]), int(v["low"]))
+                    E(
+                        int(v["high"]),
+                        int(v["high_mid"]),
+                        int(v["low_mid"]),
+                        int(v["low"]),
+                    )
                     for v in raw
                 ]
                 try:
@@ -1417,9 +1435,21 @@ class Storage:
             pass
         return values
 
-    async def find_entry(self, bucket_name: str, key_high: int, key_high_mid: int, key_low_mid: int, key_low: int):
+    async def find_entry(
+        self,
+        bucket_name: str,
+        key_high: int,
+        key_high_mid: int,
+        key_low_mid: int,
+        key_low: int,
+    ):
         return await self._submit_task(
-            self.find_entry_in_bucket_sync, bucket_name, key_high, key_high_mid, key_low_mid, key_low
+            self.find_entry_in_bucket_sync,
+            bucket_name,
+            key_high,
+            key_high_mid,
+            key_low_mid,
+            key_low,
         )
 
     async def get_values_async(self, entry):
@@ -1500,8 +1530,18 @@ class Storage:
                         e = bucket_ds[i]
                         if (
                             int(e["key_high"]) == int(key_high)
-                            and int(e.get("key_high_mid", 0)) == int(getattr(key_high, 'high_mid', 0) if hasattr(key_high, 'high_mid') else 0)
-                            and int(e.get("key_low_mid", 0)) == int(getattr(key_low, 'low_mid', 0) if hasattr(key_low, 'low_mid') else 0)
+                            and int(e.get("key_high_mid", 0))
+                            == int(
+                                getattr(key_high, "high_mid", 0)
+                                if hasattr(key_high, "high_mid")
+                                else 0
+                            )
+                            and int(e.get("key_low_mid", 0))
+                            == int(
+                                getattr(key_low, "low_mid", 0)
+                                if hasattr(key_low, "low_mid")
+                                else 0
+                            )
                             and int(e["key_low"]) == int(key_low)
                         ):
                             found_entry = np.copy(e)
@@ -1554,15 +1594,21 @@ class Storage:
                             # overwriting more recent data from _apply_insert_sync
                             try:
                                 with self._mem_index_lock:
-                                    existing = self._mem_index.get(
-                                        (
-                                            bucket_name,
-                                            int(key_high),
-                                            int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
-                                            int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
-                                            int(key_low),
-                                        )
-                                    )
+                                    existing = self._mem_index.get((
+                                        bucket_name,
+                                        int(key_high),
+                                        int(
+                                            getattr(key_high, "high_mid", 0)
+                                            if hasattr(key_high, "high_mid")
+                                            else 0
+                                        ),
+                                        int(
+                                            getattr(key_low, "low_mid", 0)
+                                            if hasattr(key_low, "low_mid")
+                                            else 0
+                                        ),
+                                        int(key_low),
+                                    ))
                                     # If there is no existing in-memory entry, publish
                                     # the canonical file entry into the mem-index.
                                     if existing is None:
@@ -1571,8 +1617,16 @@ class Storage:
                                             self._publish_mem_index(
                                                 bucket_name,
                                                 int(key_high),
-                                                int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
-                                                int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
+                                                int(
+                                                    getattr(key_high, "high_mid", 0)
+                                                    if hasattr(key_high, "high_mid")
+                                                    else 0
+                                                ),
+                                                int(
+                                                    getattr(key_low, "low_mid", 0)
+                                                    if hasattr(key_low, "low_mid")
+                                                    else 0
+                                                ),
                                                 int(key_low),
                                                 published_entry,
                                                 None,
@@ -1588,8 +1642,24 @@ class Storage:
                                                     (
                                                         bucket_name,
                                                         int(key_high),
-                                                        int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
-                                                        int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
+                                                        int(
+                                                            getattr(
+                                                                key_high, "high_mid", 0
+                                                            )
+                                                            if hasattr(
+                                                                key_high, "high_mid"
+                                                            )
+                                                            else 0
+                                                        ),
+                                                        int(
+                                                            getattr(
+                                                                key_low, "low_mid", 0
+                                                            )
+                                                            if hasattr(
+                                                                key_low, "low_mid"
+                                                            )
+                                                            else 0
+                                                        ),
                                                         int(key_low),
                                                     )
                                                 ] = published_entry
@@ -1600,8 +1670,24 @@ class Storage:
                                                     (
                                                         bucket_name,
                                                         int(key_high),
-                                                        int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
-                                                        int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
+                                                        int(
+                                                            getattr(
+                                                                key_high, "high_mid", 0
+                                                            )
+                                                            if hasattr(
+                                                                key_high, "high_mid"
+                                                            )
+                                                            else 0
+                                                        ),
+                                                        int(
+                                                            getattr(
+                                                                key_low, "low_mid", 0
+                                                            )
+                                                            if hasattr(
+                                                                key_low, "low_mid"
+                                                            )
+                                                            else 0
+                                                        ),
                                                         int(key_low),
                                                     )
                                                 ] = None
@@ -1779,14 +1865,12 @@ class Storage:
                 if ds_name in sp_group:
                     del sp_group[ds_name]
 
-                spill_dtype = np.dtype(
-                    [
-                        ("high", "<u8"),
-                        ("high_mid", "<u8"),
-                        ("low_mid", "<u8"),
-                        ("low", "<u8"),
-                    ]
-                )
+                spill_dtype = np.dtype([
+                    ("high", "<u8"),
+                    ("high_mid", "<u8"),
+                    ("low_mid", "<u8"),
+                    ("low", "<u8"),
+                ])
 
                 ds = sp_group.create_dataset(
                     ds_name, shape=(len(values),), maxshape=(None,), dtype=spill_dtype
@@ -1867,8 +1951,16 @@ class Storage:
                         self._publish_mem_index(
                             bucket_name,
                             int(key_high),
-                            int(getattr(key_high, 'high_mid', 0) if hasattr(key_high, 'high_mid') else 0),
-                            int(getattr(key_low, 'low_mid', 0) if hasattr(key_low, 'low_mid') else 0),
+                            int(
+                                getattr(key_high, "high_mid", 0)
+                                if hasattr(key_high, "high_mid")
+                                else 0
+                            ),
+                            int(
+                                getattr(key_low, "low_mid", 0)
+                                if hasattr(key_low, "low_mid")
+                                else 0
+                            ),
                             int(key_low),
                             published_entry,
                             wal_time,
@@ -1958,7 +2050,9 @@ class Storage:
                         seq = None
                     try:
                         caller = inspect.stack()[1]
-                        caller_info = f"{caller.filename}:{caller.lineno}:{caller.function}"
+                        caller_info = (
+                            f"{caller.filename}:{caller.lineno}:{caller.function}"
+                        )
                     except Exception:
                         caller_info = None
                     try:
@@ -2149,7 +2243,14 @@ class Storage:
             values.append(E.from_int(value_int))
         return values
 
-    async def apply_insert_spill(self, entry, value_high: int, value_high_mid: int, value_low_mid: int, value_low: int) -> None:
+    async def apply_insert_spill(
+        self,
+        entry,
+        value_high: int,
+        value_high_mid: int,
+        value_low_mid: int,
+        value_low: int,
+    ) -> None:
         """
         Insert a new value into an existing spill (valueset) dataset for the given entry.
         """
@@ -2330,7 +2431,13 @@ class Storage:
                                 if k[1] == k_high and k[4] == k_low:
                                     try:
                                         self._publish_mem_index(
-                                            k[0], k[1], k[2], k[3], k[4], entry, wal_time
+                                            k[0],
+                                            k[1],
+                                            k[2],
+                                            k[3],
+                                            k[4],
+                                            entry,
+                                            wal_time,
                                         )
                                     except Exception:
                                         pass

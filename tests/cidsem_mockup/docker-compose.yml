@@ -8,9 +8,14 @@ services:
       dockerfile: Dockerfile
     container_name: cidstore
     ports:
-      - "8000:8000"
+      - "8000:8000"  # REST API for health/control
+      - "5555:5555"  # ZMQ for data operations (test compatibility)
+      - "5557:5557"  # ZMQ PUSH/PULL for mutations
+      - "5558:5558"  # ZMQ ROUTER/DEALER for reads
+      - "5559:5559"  # ZMQ PUB/SUB for notifications
     environment:
       - CIDSTORE_PORT=8000
+      - CIDSTORE_ZMQ_PORT=5555
       - CIDSTORE_HDF5_PATH=/data/cidstore.h5
       - PYTHONUNBUFFERED=1
     volumes:
@@ -35,6 +40,7 @@ services:
         condition: service_healthy
     environment:
       - CIDSTORE_URL=http://cidstore:8000
+      - CIDSTORE_ZMQ_ENDPOINT=tcp://cidstore:5555
     networks:
       - cidstore-network
 

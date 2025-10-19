@@ -111,15 +111,15 @@ class DeletionLog:
         self.lock = threading.Lock()
 
     def append(
-        self, 
-        key_high: int, 
+        self,
+        key_high: int,
         key_high_mid: int,
         key_low_mid: int,
-        key_low: int, 
-        value_high: int, 
+        key_low: int,
+        value_high: int,
         value_high_mid: int,
         value_low_mid: int,
-        value_low: int
+        value_low: int,
     ) -> None:
         """Append a deletion entry to the log."""
         assert assumption(key_high, int)
@@ -137,15 +137,15 @@ class DeletionLog:
             # Construct proper hybrid_time tuple (physical, logical, shard_id)
             hybrid_time = (int(time.time() * 1e9), 0, 0)  # Convert to nanoseconds
             self.ds[idx] = (
-                key_high, 
+                key_high,
                 key_high_mid,
                 key_low_mid,
-                key_low, 
-                value_high, 
+                key_low,
+                value_high,
                 value_high_mid,
                 value_low_mid,
-                value_low, 
-                hybrid_time
+                value_low,
+                hybrid_time,
             )
             self.file.flush()
 
@@ -367,17 +367,25 @@ class BackgroundMaintenance(threading.Thread):
                                 k_low = int(e["key_low"])
                                 k_high_mid = int(
                                     e.get("key_high_mid", 0)
-                                    if hasattr(e, "dtype") and e.dtype.names and "key_high_mid" in e.dtype.names
+                                    if hasattr(e, "dtype")
+                                    and e.dtype.names
+                                    and "key_high_mid" in e.dtype.names
                                     else 0
                                 )
                                 k_low_mid = int(
                                     e.get("key_low_mid", 0)
-                                    if hasattr(e, "dtype") and e.dtype.names and "key_low_mid" in e.dtype.names
+                                    if hasattr(e, "dtype")
+                                    and e.dtype.names
+                                    and "key_low_mid" in e.dtype.names
                                     else 0
                                 )
                                 try:
                                     await self.store.hdf.ensure_mem_index(
-                                        f"bucket_{bucket_id:04d}", k_high, k_high_mid, k_low_mid, k_low
+                                        f"bucket_{bucket_id:04d}",
+                                        k_high,
+                                        k_high_mid,
+                                        k_low_mid,
+                                        k_low,
                                     )
                                 except Exception:
                                     # best-effort per-entry
@@ -777,20 +785,26 @@ class MaintenanceManager:
         }
 
     def log_deletion(
-        self, 
-        key_high: int, 
+        self,
+        key_high: int,
         key_high_mid: int,
         key_low_mid: int,
-        key_low: int, 
-        value_high: int, 
+        key_low: int,
+        value_high: int,
         value_high_mid: int,
         value_low_mid: int,
-        value_low: int
+        value_low: int,
     ) -> None:
         """Log a deletion for background GC."""
         self.deletion_log.append(
-            key_high, key_high_mid, key_low_mid, key_low, 
-            value_high, value_high_mid, value_low_mid, value_low
+            key_high,
+            key_high_mid,
+            key_low_mid,
+            key_low,
+            value_high,
+            value_high_mid,
+            value_low_mid,
+            value_low,
         )
 
     def run_gc_once(self) -> None:

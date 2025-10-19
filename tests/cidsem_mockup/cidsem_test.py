@@ -3,15 +3,15 @@
 CIDSem Mockup Test
 
 This script mimics CIDSem behavior by generating deterministic CID triples
-using a fixed random seed, inserting them into CIDStore via REST API,
+using a fixed random seed, inserting them into CIDStore via ZMQ (high-performance),
 then verifying all triples can be retrieved correctly.
 
 Test flow:
-1. Wait for CIDStore to be ready
+1. Wait for CIDStore to be ready (REST health check)
 2. Generate 1 million CID triples using random.seed(42)
-3. Insert triples via REST API (batched for efficiency)
+3. Insert triples via ZMQ (batched for efficiency)
 4. Reset seed and regenerate expected triples
-5. Query all triples and verify they match
+5. Query all triples via ZMQ and verify they match
 """
 
 import random
@@ -19,15 +19,15 @@ import sys
 import time
 from typing import List, Tuple
 
+import msgpack
 import requests
+import zmq
 from config import (
-    BATCH_INSERT_ENDPOINT,
     BATCH_SIZE,
     CIDSTORE_URL,
-    INSERT_ENDPOINT,
+    CIDSTORE_ZMQ_ENDPOINT,
     MAX_RETRIES,
     NUM_TRIPLES,
-    QUERY_ENDPOINT,
     RETRY_DELAY,
     SEED,
 )
@@ -98,31 +98,57 @@ def wait_for_cidstore(max_retries: int = MAX_RETRIES, delay: int = RETRY_DELAY) 
     return False
 
 
-def insert_triples_batch(triples: List[Tuple[str, str, str]]) -> bool:
-    """Insert a batch of triples via REST API.
+def create_zmq_socket() -> zmq.Socket:
+    """Create and connect ZMQ socket to CIDStore.
+
+    Returns:
+        Connected ZMQ REQ socket
+    """
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+    socket.connect(CIDSTORE_ZMQ_ENDPOINT)
+    return socket
+
+
+def insert_triples_batch_zmq(
+    socket: zmq.Socket, triples: List[Tuple[str, str, str]]
+) -> bool:
+    """Insert a batch of triples via ZMQ with msgpack.
 
     Args:
+        socket: ZMQ socket
         triples: List of (subject, predicate, object) tuples
 
     Returns:
         True if insertion succeeded, False otherwise
     """
-    payload = {
-        "triples": [{"subject": s, "predicate": p, "object": o} for s, p, o in triples]
-    }
-
     try:
-        response = requests.post(BATCH_INSERT_ENDPOINT, json=payload, timeout=30)
-        return response.status_code == 200
-    except requests.exceptions.RequestException as e:
+        # Send batch insert command
+        message = {
+            "command": "batch_insert",
+            "triples": [{"s": s, "p": p, "o": o} for s, p, o in triples],
+        }
+        socket.send(msgpack.packb(message, use_bin_type=True))
+
+        # Wait for response with timeout
+        if socket.poll(30000):  # 30 second timeout
+            response = msgpack.unpackb(socket.recv(), raw=False)
+            return response.get("status") == "ok"
+        else:
+            print("✗ Batch insert timeout")
+            return False
+    except Exception as e:
         print(f"✗ Batch insert failed: {e}")
         return False
 
 
-def insert_triple(subject: str, predicate: str, obj: str) -> bool:
-    """Insert a single triple via REST API.
+def insert_triple_zmq(
+    socket: zmq.Socket, subject: str, predicate: str, obj: str
+) -> bool:
+    """Insert a single triple via ZMQ with msgpack.
 
     Args:
+        socket: ZMQ socket
         subject: Subject CID
         predicate: Predicate CID
         obj: Object CID
@@ -130,24 +156,33 @@ def insert_triple(subject: str, predicate: str, obj: str) -> bool:
     Returns:
         True if insertion succeeded, False otherwise
     """
-    payload = {
-        "subject": subject,
-        "predicate": predicate,
-        "object": obj,
-    }
-
     try:
-        response = requests.post(INSERT_ENDPOINT, json=payload, timeout=10)
-        return response.status_code == 200
-    except requests.exceptions.RequestException as e:
+        message = {
+            "command": "insert",
+            "s": subject,
+            "p": predicate,
+            "o": obj,
+        }
+        socket.send(msgpack.packb(message, use_bin_type=True))
+
+        if socket.poll(10000):  # 10 second timeout
+            response = msgpack.unpackb(socket.recv(), raw=False)
+            return response.get("status") == "ok"
+        else:
+            print("✗ Insert timeout")
+            return False
+    except Exception as e:
         print(f"✗ Insert failed: {e}")
         return False
 
 
-def query_triple(subject: str, predicate: str, obj: str = None) -> dict:
-    """Query triples from CIDStore.
+def query_triple_zmq(
+    socket: zmq.Socket, subject: str, predicate: str, obj: str | None = None
+) -> dict:
+    """Query triples from CIDStore via ZMQ with msgpack.
 
     Args:
+        socket: ZMQ socket
         subject: Subject CID
         predicate: Predicate CID
         obj: Optional object CID
@@ -155,19 +190,22 @@ def query_triple(subject: str, predicate: str, obj: str = None) -> dict:
     Returns:
         Query response dictionary
     """
-    payload = {
-        "subject": subject,
-        "predicate": predicate,
-    }
-    if obj:
-        payload["object"] = obj
-
     try:
-        response = requests.post(QUERY_ENDPOINT, json=payload, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        return {"error": f"Status {response.status_code}"}
-    except requests.exceptions.RequestException as e:
+        message = {
+            "command": "query",
+            "s": subject,
+            "p": predicate,
+        }
+        if obj:
+            message["o"] = obj
+
+        socket.send(msgpack.packb(message, use_bin_type=True))
+
+        if socket.poll(10000):  # 10 second timeout
+            return msgpack.unpackb(socket.recv(), raw=False)
+        else:
+            return {"error": "Query timeout"}
+    except Exception as e:
         return {"error": str(e)}
 
 
@@ -183,10 +221,15 @@ def main():
     print(f"  CIDStore URL: {CIDSTORE_URL}")
     print("=" * 70)
 
-    # Step 1: Wait for CIDStore
+    # Step 1: Wait for CIDStore (REST health check)
     if not wait_for_cidstore():
         print("\n✗ FAILED: CIDStore not available")
         sys.exit(1)
+
+    # Connect ZMQ socket for data operations
+    print(f"\nConnecting to ZMQ endpoint: {CIDSTORE_ZMQ_ENDPOINT}")
+    socket = create_zmq_socket()
+    print("✓ ZMQ socket connected")
 
     # Step 2: Generate triples
     print(f"\n[1/4] Generating {NUM_TRIPLES:,} deterministic triples...")
@@ -203,20 +246,22 @@ def main():
     generation_time = time.time() - start_time
     print(f"✓ Generated {NUM_TRIPLES:,} triples in {generation_time:.2f}s")
 
-    # Step 3: Insert triples
-    print(f"\n[2/4] Inserting {NUM_TRIPLES:,} triples (batch size: {BATCH_SIZE:,})...")
+    # Step 3: Insert triples via ZMQ
+    print(
+        f"\n[2/4] Inserting {NUM_TRIPLES:,} triples via ZMQ (batch size: {BATCH_SIZE:,})..."
+    )
     start_time = time.time()
     inserted = 0
     failed = 0
 
     for i in range(0, len(triples), BATCH_SIZE):
         batch = triples[i : i + BATCH_SIZE]
-        if insert_triples_batch(batch):
+        if insert_triples_batch_zmq(socket, batch):
             inserted += len(batch)
         else:
             # Fallback to individual inserts if batch fails
             for s, p, o in batch:
-                if insert_triple(s, p, o):
+                if insert_triple_zmq(socket, s, p, o):
                     inserted += 1
                 else:
                     failed += 1
@@ -266,19 +311,22 @@ def main():
     start_time = time.time()
     for idx, i in enumerate(sample_indices):
         s, p, o = expected_triples[i]
-        result = query_triple(s, p, o)
+        result = query_triple_zmq(socket, s, p, o)
 
         if "error" in result:
             verification_failed += 1
         else:
             # Check if the triple exists in the response
-            # Response format may vary; adjust based on actual API
+            # Response format may vary; adjust based on actual ZMQ API
             verified += 1
 
         if (idx + 1) % 100 == 0:
             print(f"  Verified {idx + 1}/{sample_size} samples...")
 
     validation_time = time.time() - start_time
+
+    # Clean up ZMQ socket
+    socket.close()
 
     # Results
     print("\n" + "=" * 70)

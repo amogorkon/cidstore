@@ -181,7 +181,7 @@ class ValueSet:
 ```
 class E(int):
     """
-    E: 128-bit entity identifier for CIDStore keys/values.
+    E: 256-bit entity identifier for CIDStore keys/values (4 × 64-bit components: high, high_mid, low_mid, low).
 
     - Immutable, hashable, and convertible to/from HDF5.
     - Used for all key/value storage and WAL logging.

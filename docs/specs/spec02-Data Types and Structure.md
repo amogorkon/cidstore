@@ -23,7 +23,7 @@ classDiagram
     class HashEntry {
         +key: E
         +slots: E[2] or SpillPointer
-        +checksum: 2 x uint64
+        +checksum: 4 x uint64
     }
 
     class ValueSet {
@@ -34,6 +34,8 @@ classDiagram
 
     class E {
         +high: uint64
+        +high_mid: uint64
+        +low_mid: uint64
         +low: uint64
     }
 
@@ -103,8 +105,8 @@ All types are fixed-width for O(1) access. See UML above for explicit field name
 
 | Component         | Structure / dtype fields                                      | Size   | Description                                                      |
 |-------------------|--------------------------------------------------------------|--------|------------------------------------------------------------------|
-| Key               | `[high: u64, low: u64]`                                      | 16B    | 128-bit immutable identifier (SHA3 or composite hash)            |
-| Hash Entry        | `[key_high: u64, key_low: u64, slots: [E, E] or SpillPointer, checksum: u128]` | 64B    | Maps key to up to two values inline, or to an external ValueSet via SpillPointer. No state mask. |
+| Key               | `[high: u64, high_mid: u64, low_mid: u64, low: u64]`        | 32B    | 256-bit immutable identifier (full SHA-256 CID, stored as 4×64-bit components) |
+| Hash Entry        | `[key_high: u64, key_high_mid: u64, key_low_mid: u64, key_low: u64, slots: [(high: u64, high_mid: u64, low_mid: u64, low: u64), (high: u64, high_mid: u64, low_mid: u64, low: u64)] or SpillPointer, checksum: u256]` | 144B   | Maps 256-bit key to up to two 256-bit values inline, or to an external ValueSet via SpillPointer. No state mask. |
 | Value Set         | `[E[] values, sorted_count: u32, tombstone_count: u32]`    | Var    | External dataset for high-cardinality keys; tombstone for GC     |
 | Spill Pointer     | `[ref: u64]`                                                 | 8B     | HDF5 object reference to external ValueSet (spill mode)          |
 | Deletion Record   | `[key_high: u64, key_low: u64, value_group: S8, timestamp: u64]` | 32B    | Tracks obsolete keys for GC; timestamp is Unix ns                |
@@ -266,10 +268,12 @@ classDiagram
 
 **E Structure:**
 
-| Field | Type    | Description         |
-|-------|---------|---------------------|
-| high  | uint64  | High 64 bits of E |
-| low   | uint64  | Low 64 bits of E  |
+| Field     | Type    | Description                         |
+|-----------|---------|-------------------------------------|
+| high      | uint64  | Highest 64 bits of 256-bit CID      |
+| high_mid  | uint64  | High-middle 64 bits of 256-bit CID  |
+| low_mid   | uint64  | Low-middle 64 bits of 256-bit CID   |
+| low       | uint64  | Lowest 64 bits of 256-bit CID       |
 
 **Cross-References:**
 - [Spec 12: Predicate Specialization](spec%2012%20-%20Predicate%20Specialization.md) - Query patterns and specialized DS APIs

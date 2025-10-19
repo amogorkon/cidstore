@@ -6,9 +6,13 @@ This directory contains a system-level integration test that mimics CIDSem behav
 
 The test:
 1. Generates 1 million deterministic CID triples using `random.seed(42)`
-2. Inserts them into CIDStore via REST API (batched for efficiency)
+2. Inserts them into CIDStore via ZMQ (high-performance bulk operations with msgpack serialization)
 3. Regenerates the same triples by resetting the seed
-4. Samples and verifies that the triples were correctly stored
+4. Samples and verifies that the triples were correctly stored via ZMQ queries
+
+**Protocol Usage:**
+- **ZMQ (port 5555)**: All data operations - insertions and queries using msgpack binary serialization
+- **REST API (port 8000)**: Health checks only
 
 ## Quick Start
 
@@ -26,7 +30,8 @@ Edit `config.py` to customize:
 - `SEED`: Random seed for deterministic generation (default: 42)
 - `NUM_TRIPLES`: Number of triples to generate (default: 1,000,000)
 - `BATCH_SIZE`: Batch size for insertions (default: 1,000)
-- `CIDSTORE_URL`: CIDStore endpoint (default: http://cidstore:8000)
+- `CIDSTORE_URL`: CIDStore REST endpoint for health checks (default: http://cidstore:8000)
+- `CIDSTORE_ZMQ_ENDPOINT`: CIDStore ZMQ endpoint for data operations (default: tcp://cidstore:5555)
 
 ## Files
 
@@ -52,10 +57,12 @@ Success criteria:
 
 If the test fails to connect:
 - Check `docker-compose logs cidstore` for CIDStore errors
-- Ensure the REST API is implemented and health endpoint exists
+- Ensure both REST health endpoint and ZMQ interface are running
+- Verify ports 8000 (REST) and 5555 (ZMQ) are exposed
 - Adjust `MAX_RETRIES` and `RETRY_DELAY` in `config.py`
 
 If insertions fail:
-- Verify REST API endpoint paths match your implementation
-- Check payload format matches your API schema
+- Verify ZMQ server is listening on port 5555
+- Check ZMQ message format matches the expected protocol
 - Review CIDStore logs for server-side errors
+- Test ZMQ connectivity manually

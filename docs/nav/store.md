@@ -64,7 +64,7 @@ classDiagram
 | ValueSet    | `values: E[]`, `sorted_count: int`, `tombstone_count: int`                          | External dataset for high-cardinality keys                                  |
 | SpillPointer| `ref: u64`, `sorted_count: u32`, `checksum: u128`                                   | Points to external value-list location                                      |
 | Directory   | `buckets: Bucket[]`, `num_buckets: int`                                             | Array of buckets, stored as HDF5 datasets                                   |
-| E           | `high: u64`, `low: u64`                                                            | 128-bit entity key                                                          |
+| E           | `high: u64`, `high_mid: u64`, `low_mid: u64`, `low: u64`                          | 256-bit entity key (full SHA-256)                                           |
 
 ---
 

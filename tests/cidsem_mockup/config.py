@@ -2,17 +2,15 @@
 
 import os
 
-# CIDStore REST API endpoint
+# CIDStore REST API endpoint (used only for health checks)
 CIDSTORE_URL = os.getenv("CIDSTORE_URL", "http://cidstore:8000")
+
+# CIDStore ZMQ endpoint (used for all data operations)
+CIDSTORE_ZMQ_ENDPOINT = os.getenv("CIDSTORE_ZMQ_ENDPOINT", "tcp://cidstore:5555")
 
 # Test configuration
 SEED = 42
 NUM_TRIPLES = 1_000_000
-
-# API endpoints
-INSERT_ENDPOINT = f"{CIDSTORE_URL}/triple/insert"
-QUERY_ENDPOINT = f"{CIDSTORE_URL}/triple/query"
-BATCH_INSERT_ENDPOINT = f"{CIDSTORE_URL}/triple/batch_insert"
 
 # Batch size for inserting triples
 BATCH_SIZE = 1000

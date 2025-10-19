@@ -251,8 +251,14 @@ class CIDStore:
     def log_deletion(self, key: E, value: E):
         assert hasattr(self, "maintenance_manager"), "Maintenance not initialized"
         self.maintenance_manager.log_deletion(
-            key.high, key.high_mid, key.low_mid, key.low, 
-            value.high, value.high_mid, value.low_mid, value.low
+            key.high,
+            key.high_mid,
+            key.low_mid,
+            key.low,
+            value.high,
+            value.high_mid,
+            value.low_mid,
+            value.low,
         )
 
     def run_gc_once(self):
@@ -326,16 +332,30 @@ class CIDStore:
                     k_low = int(e["key_low"])
                     # Extract mid components if present in the stored entry
                     k_high_mid = (
-                        int(e["key_high_mid"]) if (hasattr(e, "dtype") and e.dtype.names and "key_high_mid" in e.dtype.names) else 0
+                        int(e["key_high_mid"])
+                        if (
+                            hasattr(e, "dtype")
+                            and e.dtype.names
+                            and "key_high_mid" in e.dtype.names
+                        )
+                        else 0
                     )
                     k_low_mid = (
-                        int(e["key_low_mid"]) if (hasattr(e, "dtype") and e.dtype.names and "key_low_mid" in e.dtype.names) else 0
+                        int(e["key_low_mid"])
+                        if (
+                            hasattr(e, "dtype")
+                            and e.dtype.names
+                            and "key_low_mid" in e.dtype.names
+                        )
+                        else 0
                     )
                     try:
                         # Run the mem-index refresh on the storage worker
                         # rather than calling the synchronous helper from
                         # the event loop to avoid blocking the loop.
-                        await self.hdf.ensure_mem_index(new_bucket_name, k_high, k_high_mid, k_low_mid, k_low)
+                        await self.hdf.ensure_mem_index(
+                            new_bucket_name, k_high, k_high_mid, k_low_mid, k_low
+                        )
                     except Exception:
                         # best-effort per-entry
                         pass
@@ -362,14 +382,20 @@ class CIDStore:
                 bucket_name = f"bucket_{bucket_id:04d}"
                 k_high = int(key.high) if hasattr(key, "high") else int(key[0])
                 k_low = int(key.low) if hasattr(key, "low") else int(key[1])
-                k_high_mid = int(getattr(key, "high_mid", 0) if hasattr(key, "high_mid") else 0)
-                k_low_mid = int(getattr(key, "low_mid", 0) if hasattr(key, "low_mid") else 0)
+                k_high_mid = int(
+                    getattr(key, "high_mid", 0) if hasattr(key, "high_mid") else 0
+                )
+                k_low_mid = int(
+                    getattr(key, "low_mid", 0) if hasattr(key, "low_mid") else 0
+                )
                 # Call storage's synchronous helper directly so mem-index
                 # refresh completes before compact returns.
                 try:
                     # Synchronous context: use storage's sync helper to
                     # deterministically publish mem-index before returning.
-                    self.hdf._ensure_mem_index_sync(bucket_name, k_high, k_high_mid, k_low_mid, k_low)
+                    self.hdf._ensure_mem_index_sync(
+                        bucket_name, k_high, k_high_mid, k_low_mid, k_low
+                    )
                 except Exception:
                     # best-effort: do not fail compact on storage errors
                     pass
@@ -432,12 +458,18 @@ class CIDStore:
                 k_high = int(key.high) if hasattr(key, "high") else int(key[0])
                 k_low = int(key.low) if hasattr(key, "low") else int(key[1])
                 # Compute mid components if present
-                k_high_mid = int(getattr(key, "high_mid", 0) if hasattr(key, "high_mid") else 0)
-                k_low_mid = int(getattr(key, "low_mid", 0) if hasattr(key, "low_mid") else 0)
+                k_high_mid = int(
+                    getattr(key, "high_mid", 0) if hasattr(key, "high_mid") else 0
+                )
+                k_low_mid = int(
+                    getattr(key, "low_mid", 0) if hasattr(key, "low_mid") else 0
+                )
                 try:
                     # Synchronous demotion path: use sync helper to ensure
                     # mem-index is published before returning.
-                    self.hdf._ensure_mem_index_sync(bucket_name, k_high, k_high_mid, k_low_mid, k_low)
+                    self.hdf._ensure_mem_index_sync(
+                        bucket_name, k_high, k_high_mid, k_low_mid, k_low
+                    )
                 except Exception:
                     # best-effort
                     pass
@@ -978,7 +1010,9 @@ class CIDStore:
         # from multiple threads or relying on the main file handle which
         # may be stale. The helper will open a fresh reader and scan the
         # bucket for the requested key, returning a copied entry if found.
-        entry = await self.hdf.find_entry(bucket_name, key.high, key.high_mid, key.low_mid, key.low)
+        entry = await self.hdf.find_entry(
+            bucket_name, key.high, key.high_mid, key.low_mid, key.low
+        )
         if entry is None:
             # If the worker-local mem-index and file scan missed the key,
             # attempt a single additional mem-index refresh and retry
@@ -1005,7 +1039,9 @@ class CIDStore:
             logger.debug(
                 f"[CIDStore.get] find_entry retry after ensure_mem_index for {bucket_name} key=({int(key.high)},{int(key.low)})"
             )
-            entry = await self.hdf.find_entry(bucket_name, key.high, key.high_mid, key.low_mid, key.low)
+            entry = await self.hdf.find_entry(
+                bucket_name, key.high, key.high_mid, key.low_mid, key.low
+            )
             if entry is not None:
                 return await self.hdf.get_values_async(entry)
 
@@ -1129,7 +1165,9 @@ class CIDStore:
 
         # Delegate to Storage worker to scan the bucket for the entry and
         # return a copied entry if present.
-        entry = await self.hdf.find_entry(bucket_name, key.high, key.high_mid, key.low_mid, key.low)
+        entry = await self.hdf.find_entry(
+            bucket_name, key.high, key.high_mid, key.low_mid, key.low
+        )
         if entry is None:
             return None
         return {
@@ -2242,13 +2280,37 @@ class CIDStore:
                     # so concurrent readers see deterministic state.
                     try:
                         await self.hdf.ensure_mem_index(
-                            f"bucket_{old_bucket_id:04d}", k_high, int(getattr(k_high, 'high_mid', 0) if hasattr(k_high, 'high_mid') else 0), int(getattr(k_low, 'low_mid', 0) if hasattr(k_low, 'low_mid') else 0), k_low
+                            f"bucket_{old_bucket_id:04d}",
+                            k_high,
+                            int(
+                                getattr(k_high, "high_mid", 0)
+                                if hasattr(k_high, "high_mid")
+                                else 0
+                            ),
+                            int(
+                                getattr(k_low, "low_mid", 0)
+                                if hasattr(k_low, "low_mid")
+                                else 0
+                            ),
+                            k_low,
                         )
                     except Exception:
                         pass
                     try:
                         await self.hdf.ensure_mem_index(
-                            f"bucket_{new_bucket_id:04d}", k_high, int(getattr(k_high, 'high_mid', 0) if hasattr(k_high, 'high_mid') else 0), int(getattr(k_low, 'low_mid', 0) if hasattr(k_low, 'low_mid') else 0), k_low
+                            f"bucket_{new_bucket_id:04d}",
+                            k_high,
+                            int(
+                                getattr(k_high, "high_mid", 0)
+                                if hasattr(k_high, "high_mid")
+                                else 0
+                            ),
+                            int(
+                                getattr(k_low, "low_mid", 0)
+                                if hasattr(k_low, "low_mid")
+                                else 0
+                            ),
+                            k_low,
                         )
                     except Exception:
                         pass
@@ -2410,14 +2472,20 @@ class CIDStore:
             entry = bucket[i]
             # Check all 4 components for 256-bit keys
             # numpy structured arrays don't support .get(), so check field names first
-            entry_fields = entry.dtype.names if hasattr(entry.dtype, 'names') else []
-            key_high_mid = int(entry["key_high_mid"]) if "key_high_mid" in entry_fields else 0
-            key_low_mid = int(entry["key_low_mid"]) if "key_low_mid" in entry_fields else 0
-            
-            if (entry["key_high"] == key.high and 
-                key_high_mid == key.high_mid and
-                key_low_mid == key.low_mid and
-                entry["key_low"] == key.low):
+            entry_fields = entry.dtype.names if hasattr(entry.dtype, "names") else []
+            key_high_mid = (
+                int(entry["key_high_mid"]) if "key_high_mid" in entry_fields else 0
+            )
+            key_low_mid = (
+                int(entry["key_low_mid"]) if "key_low_mid" in entry_fields else 0
+            )
+
+            if (
+                entry["key_high"] == key.high
+                and key_high_mid == key.high_mid
+                and key_low_mid == key.low_mid
+                and entry["key_low"] == key.low
+            ):
                 # Coerce slots to plain Python ints to avoid structured/void comparisons
                 raw_slots = entry["slots"]
 
@@ -2427,7 +2495,12 @@ class CIDStore:
 
                     if isinstance(s, (list, tuple, _np.ndarray)) and len(s) == 4:
                         try:
-                            return (int(s[0]) << 192) | (int(s[1]) << 128) | (int(s[2]) << 64) | int(s[3])
+                            return (
+                                (int(s[0]) << 192)
+                                | (int(s[1]) << 128)
+                                | (int(s[2]) << 64)
+                                | int(s[3])
+                            )
                         except Exception:
                             return 0
 
@@ -2443,8 +2516,18 @@ class CIDStore:
                         names = getattr(s, "dtype").names
                         if names:
                             # 256-bit value with 4 components
-                            if "high" in names and "high_mid" in names and "low_mid" in names and "low" in names:
-                                return (int(s["high"]) << 192) | (int(s["high_mid"]) << 128) | (int(s["low_mid"]) << 64) | int(s["low"])
+                            if (
+                                "high" in names
+                                and "high_mid" in names
+                                and "low_mid" in names
+                                and "low" in names
+                            ):
+                                return (
+                                    (int(s["high"]) << 192)
+                                    | (int(s["high_mid"]) << 128)
+                                    | (int(s["low_mid"]) << 64)
+                                    | int(s["low"])
+                                )
                             # Legacy 128-bit value with 2 components
                             if "high" in names and "low" in names:
                                 return (int(s["high"]) << 64) | int(s["low"])
@@ -2466,14 +2549,29 @@ class CIDStore:
                     if isinstance(v, E):
                         return int(v)
                     if isinstance(v, (list, tuple, _np.ndarray)) and len(v) == 4:
-                        return (int(v[0]) << 192) | (int(v[1]) << 128) | (int(v[2]) << 64) | int(v[3])
+                        return (
+                            (int(v[0]) << 192)
+                            | (int(v[1]) << 128)
+                            | (int(v[2]) << 64)
+                            | int(v[3])
+                        )
                     if isinstance(v, (list, tuple, _np.ndarray)) and len(v) == 2:
                         return (int(v[0]) << 64) | int(v[1])
                     if hasattr(v, "dtype") and getattr(v, "dtype") is not None:
                         names = getattr(v, "dtype").names
                         if names:
-                            if "high" in names and "high_mid" in names and "low_mid" in names and "low" in names:
-                                return (int(v["high"]) << 192) | (int(v["high_mid"]) << 128) | (int(v["low_mid"]) << 64) | int(v["low"])
+                            if (
+                                "high" in names
+                                and "high_mid" in names
+                                and "low_mid" in names
+                                and "low" in names
+                            ):
+                                return (
+                                    (int(v["high"]) << 192)
+                                    | (int(v["high_mid"]) << 128)
+                                    | (int(v["low_mid"]) << 64)
+                                    | int(v["low"])
+                                )
                             if "high" in names and "low" in names:
                                 return (int(v["high"]) << 64) | int(v["low"])
                     try:
@@ -2482,7 +2580,7 @@ class CIDStore:
                         raise TypeError(f"Cannot convert value to int: {type(v)}")
 
                 target = _to_int_val(value)
-                
+
                 # Convert slots list to list of 4-tuples for updating
                 def _int_to_slot(val):
                     if val == 0:
@@ -2491,11 +2589,11 @@ class CIDStore:
                         (val >> 192) & 0xFFFFFFFFFFFFFFFF,
                         (val >> 128) & 0xFFFFFFFFFFFFFFFF,
                         (val >> 64) & 0xFFFFFFFFFFFFFFFF,
-                        val & 0xFFFFFFFFFFFFFFFF
+                        val & 0xFFFFFFFFFFFFFFFF,
                     )
-                
+
                 slot_tuples = [_int_to_slot(s) for s in slots]
-                
+
                 for j in range(len(slots)):
                     if slots[j] == target:
                         slot_tuples[j] = (0, 0, 0, 0)
@@ -2518,7 +2616,9 @@ class CIDStore:
                 # Update entry (ensure slots stored as tuple of 4-tuples for 256-bit values)
                 # Need to include all 4 key components for 256-bit keys
                 # numpy.void doesn't have .get(), so check field names and access directly
-                entry_fields = entry.dtype.names if hasattr(entry.dtype, 'names') else []
+                entry_fields = (
+                    entry.dtype.names if hasattr(entry.dtype, "names") else []
+                )
                 new_entry = (
                     int(entry["key_high"]),
                     int(entry["key_high_mid"]) if "key_high_mid" in entry_fields else 0,
@@ -2541,8 +2641,20 @@ class CIDStore:
                 else:
                     # Update mem_index with new slots
                     import numpy as np
-                    new_slots_array = np.array(slot_tuples, dtype=[('high', '<u8'), ('high_mid', '<u8'), ('low_mid', '<u8'), ('low', '<u8')])
-                    self.hdf._mem_index[mem_key] = (new_slots_array, None)  # None for wal_time since this is a direct update
+
+                    new_slots_array = np.array(
+                        slot_tuples,
+                        dtype=[
+                            ("high", "<u8"),
+                            ("high_mid", "<u8"),
+                            ("low_mid", "<u8"),
+                            ("low", "<u8"),
+                        ],
+                    )
+                    self.hdf._mem_index[mem_key] = (
+                        new_slots_array,
+                        None,
+                    )  # None for wal_time since this is a direct update
                 break
 
     async def rebalance_buckets(self) -> None:
@@ -2686,10 +2798,22 @@ class CIDStore:
                             k_high = int(e["key_high"])
                             k_low = int(e["key_low"])
                             k_high_mid = (
-                                int(e["key_high_mid"]) if (hasattr(e, "dtype") and e.dtype.names and "key_high_mid" in e.dtype.names) else 0
+                                int(e["key_high_mid"])
+                                if (
+                                    hasattr(e, "dtype")
+                                    and e.dtype.names
+                                    and "key_high_mid" in e.dtype.names
+                                )
+                                else 0
                             )
                             k_low_mid = (
-                                int(e["key_low_mid"]) if (hasattr(e, "dtype") and e.dtype.names and "key_low_mid" in e.dtype.names) else 0
+                                int(e["key_low_mid"])
+                                if (
+                                    hasattr(e, "dtype")
+                                    and e.dtype.names
+                                    and "key_low_mid" in e.dtype.names
+                                )
+                                else 0
                             )
                             try:
                                 # Use synchronous helper when called from

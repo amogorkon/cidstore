@@ -5,12 +5,16 @@ This guide explains how to run the complete system-level integration test that v
 ## Overview
 
 The system test validates CIDStore by:
-1. **Deploying CIDStore** in a Docker container with REST API
+1. **Deploying CIDStore** in a Docker container with ZMQ data interface and REST API for control
 2. **Generating deterministic data** using a seeded random number generator
-3. **Inserting 1 million triples** via the REST API
-4. **Verifying correctness** by regenerating and querying triples
+3. **Inserting 1 million triples** via ZMQ (high-performance bulk operations)
+4. **Verifying correctness** by regenerating and querying triples via ZMQ
 
 This mimics real-world CIDSem usage patterns and validates the complete stack from API to storage.
+
+**Protocol Usage:**
+- **ZMQ (port 5555)**: All data operations (insert, query, batch operations) - high throughput
+- **REST API (port 8000)**: Health checks and control operations only - debugging/monitoring
 
 ## Prerequisites
 
@@ -30,56 +34,17 @@ This mimics real-world CIDSem usage patterns and validates the complete stack fr
 
 ## Step 1: Set Up CIDStore Docker Container
 
-### 1.1 Create Dockerfile for CIDStore
+### 1.1 Build the CIDStore Image
 
-First, ensure you have a `Dockerfile` in the repository root that builds the CIDStore REST API server.
+The repository includes a complete `Dockerfile` in the root directory that:
+- Uses Python 3.13 with free-threading and JIT support
+- Installs all necessary dependencies (HDF5, pyzmq, msgpack, FastAPI, etc.)
+- Exposes port 8000 for REST API (health checks/control)
+- Exposes ports 5555, 5557-5559 for ZMQ data operations
+- Starts both REST and ZMQ servers via `docker-entrypoint.sh`
+- Includes health check endpoint for container orchestration
 
-**Example `Dockerfile`** (create at repository root if it doesn't exist):
-
-```dockerfile
-FROM python:3.12-slim
-
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libhdf5-dev \
-    pkg-config \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy CIDStore source code
-COPY src/ ./src/
-COPY pyproject.toml .
-
-# Install CIDStore
-RUN pip install -e .
-
-# Create data directory
-RUN mkdir -p /data
-
-# Expose REST API port
-EXPOSE 8000
-
-# Health check
-HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
-  CMD curl -f http://localhost:8000/health || exit 1
-
-# Run the REST API server
-CMD ["python", "-m", "cidstore.rest_api"]
-```
-
-**Notes:**
-- Adjust the CMD based on your actual REST API entry point
-- Ensure `requirements.txt` includes all dependencies (h5py, fastapi, uvicorn, etc.)
-- The health check endpoint (`/health`) must be implemented in your REST API
-
-### 1.2 Verify Docker Setup
+### 1.2 Build and Verify Docker Setup
 
 Build the CIDStore image:
 
@@ -91,13 +56,17 @@ docker build -t cidstore:latest .
 Test the image:
 
 ```bash
-docker run -p 8000:8000 cidstore:latest
+docker run -p 8000:8000 -p 5555:5555 cidstore:latest
 ```
 
-Verify the server is running by accessing `http://localhost:8000/health` in a browser or using curl:
+Verify the server is running:
 
 ```bash
+# Check REST health endpoint
 curl http://localhost:8000/health
+
+# Test ZMQ connection (optional, requires zmq tools)
+# The actual test will validate ZMQ connectivity
 ```
 
 You should see a successful response (e.g., `{"status": "healthy"}`).
@@ -133,15 +102,23 @@ NUM_TRIPLES = 10_000  # Quick test with 10k triples
 
 The test script (`cidsem_test.py`) performs these steps:
 
-1. **Wait for CIDStore**: Retries connection up to 30 times (configurable)
-2. **Generate triples**: Uses `random.seed(42)` to create deterministic CIDs
+1. **Wait for CIDStore**: Retries REST health check up to 30 times (configurable)
+2. **Connect ZMQ socket**: Establishes ZMQ REQ socket to `tcp://cidstore:5555`
+3. **Generate triples**: Uses `random.seed(42)` to create deterministic CIDs
    - Format: `E(high, low)` where high/low are 64-bit integers
-3. **Insert triples**: Batched REST API calls for efficiency
-   - Endpoint: `POST /triple/batch_insert`
-   - Payload: `{"triples": [{"subject": "E(...)", "predicate": "E(...)", "object": "E(...)"}]}`
-4. **Regenerate triples**: Resets seed and regenerates expected data
-5. **Verify samples**: Queries 1000 random triples to validate storage
-   - Endpoint: `POST /triple/query`
+4. **Insert triples**: Batched ZMQ messages using msgpack serialization for high-performance bulk operations
+   - Message: `{"command": "batch_insert", "triples": [{"s": "E(...)", "p": "E(...)", "o": "E(...)"}]}`
+   - Serialized with: `msgpack.packb(message, use_bin_type=True)`
+   - Response: `{"status": "ok"}` or error (msgpack encoded)
+5. **Regenerate triples**: Resets seed and regenerates expected data
+6. **Verify samples**: Queries 1000 random triples via ZMQ/msgpack to validate storage
+   - Message: `{"command": "query", "s": "E(...)", "p": "E(...)", "o": "E(...)"}`
+
+**Why ZMQ + msgpack?**
+- **Performance**: 10-100x faster than REST for bulk operations
+- **Efficiency**: Binary protocol, no HTTP overhead, compact msgpack serialization
+- **Scalability**: CIDSem design pattern for high-throughput triple stores
+- **Proper binary handling**: msgpack handles binary data correctly, unlike JSON
 
 ## Step 3: Run the System Test
 
@@ -176,13 +153,16 @@ Configuration:
 Waiting for CIDStore at http://cidstore:8000...
 ✓ CIDStore is ready (attempt 3/30)
 
+Connecting to ZMQ endpoint: tcp://cidstore:5555
+✓ ZMQ socket connected
+
 [1/4] Generating 1,000,000 deterministic triples...
   Generated 100,000 triples (2.3s)
   Generated 200,000 triples (4.5s)
   ...
 ✓ Generated 1,000,000 triples in 22.87s
 
-[2/4] Inserting 1,000,000 triples (batch size: 1,000)...
+[2/4] Inserting 1,000,000 triples via ZMQ (batch size: 1,000)...
   Inserted 10,000/1,000,000 triples (8234 triples/sec, 0 failed)
   Inserted 20,000/1,000,000 triples (8891 triples/sec, 0 failed)
   ...
@@ -223,9 +203,9 @@ Verification fails: 0/1000
 - ✓ Verification success rate ≥ 95%
 
 **If the test passes**: Your CIDStore implementation correctly handles:
-- Large-scale batch insertions
+- Large-scale batch insertions via ZMQ
 - Deterministic storage and retrieval
-- REST API endpoints
+- ZMQ data protocol and REST health endpoints
 - Concurrent operations
 
 **If the test fails**: See troubleshooting section below
@@ -269,11 +249,13 @@ Waiting for CIDStore at http://cidstore:8000...
    ```
    Should return HTTP 200 with status message
 
-3. **Check port mapping:**
+3. **Check port mappings:**
    ```bash
    docker-compose ps
    ```
-   Verify cidstore is running and port 8000 is mapped
+   Verify cidstore is running with both ports mapped:
+   - `0.0.0.0:8000->8000/tcp` (REST health)
+   - `0.0.0.0:5555->5555/tcp` (ZMQ data)
 
 4. **Increase retry settings:**
    Edit `config.py`:
@@ -293,23 +275,25 @@ Waiting for CIDStore at http://cidstore:8000...
 
 **Solutions:**
 
-1. **Check REST API endpoints:**
-   Verify your API implements:
-   - `POST /triple/batch_insert` - accepts `{"triples": [...]}`
-   - `POST /triple/insert` - fallback for single inserts
+1. **Check ZMQ endpoint:**
+   Verify your server is listening on ZMQ port 5555:
+   ```bash
+   docker exec -it cidstore netstat -ln | grep 5555
+   ```
+   Or check CIDStore logs for ZMQ binding messages
 
-2. **Review payload format:**
-   Ensure your API expects:
-   ```json
-   {
-     "triples": [
-       {
-         "subject": "E(1234567890,9876543210)",
-         "predicate": "E(1111111111,2222222222)",
-         "object": "E(3333333333,4444444444)"
-       }
-     ]
-   }
+2. **Review ZMQ message format:**
+   Ensure your ZMQ handler expects msgpack-encoded messages:
+   ```python
+   # Server side:
+   message = msgpack.unpackb(socket.recv(), raw=False)
+   # message = {
+   #   "command": "batch_insert",
+   #   "triples": [{"s": "E(...)", "p": "E(...)", "o": "E(...)"}]
+   # }
+
+   # Respond with msgpack:
+   socket.send(msgpack.packb({"status": "ok"}, use_bin_type=True))
    ```
 
 3. **Check CIDStore capacity:**
@@ -337,14 +321,27 @@ Verification fails: 350/1000
 
 **Solutions:**
 
-1. **Check query endpoint:**
-   Verify `POST /triple/query` is implemented and returns correct format
+1. **Check ZMQ query handler:**
+   Verify your ZMQ server handles query commands (msgpack encoded):
+   ```python
+   # Message format:
+   {"command": "query", "s": "E(...)", "p": "E(...)", "o": "E(...)"}
+   # Server should respond with matching triples or empty results (msgpack encoded)
+   ```
 
-2. **Test manual query:**
+2. **Test ZMQ connection manually:**
+   Use Python inside container:
    ```bash
-   curl -X POST http://localhost:8000/triple/query \
-     -H "Content-Type: application/json" \
-     -d '{"subject": "E(1,2)", "predicate": "E(3,4)", "object": "E(5,6)"}'
+   docker exec -it cidstore python3 -c "
+import zmq
+import msgpack
+ctx = zmq.Context()
+sock = ctx.socket(zmq.REQ)
+sock.connect('tcp://localhost:5555')
+msg = {'command': 'query', 's': 'E(1,2)', 'p': 'E(3,4)', 'o': 'E(5,6)'}
+sock.send(msgpack.packb(msg, use_bin_type=True))
+print(msgpack.unpackb(sock.recv(), raw=False))
+"
    ```
 
 3. **Review query logic:**

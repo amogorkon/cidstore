@@ -138,9 +138,17 @@ def test_pack_record_and_unpack_record_roundtrip():
     value_low = 0x5555666677778888
 
     rec_bytes = pack_record(
-        version, op_type, time_tuple, 
-        key_high, key_high_mid, key_low_mid, key_low, 
-        value_high, value_high_mid, value_low_mid, value_low
+        version,
+        op_type,
+        time_tuple,
+        key_high,
+        key_high_mid,
+        key_low_mid,
+        key_low,
+        value_high,
+        value_high_mid,
+        value_low_mid,
+        value_low,
     )
     assert isinstance(rec_bytes, bytes)
     assert len(rec_bytes) == 128  # Doubled for 256-bit CIDs
@@ -187,9 +195,17 @@ def test_unpack_record_bad_checksum():
     value_low = 4
     rec_bytes = bytearray(
         pack_record(
-            version, op_type, time_tuple, 
-            key_high, key_high_mid, key_low_mid, key_low, 
-            value_high, value_high_mid, value_low_mid, value_low
+            version,
+            op_type,
+            time_tuple,
+            key_high,
+            key_high_mid,
+            key_low_mid,
+            key_low,
+            value_high,
+            value_high_mid,
+            value_low_mid,
+            value_low,
         )
     )
     # Corrupt the checksum

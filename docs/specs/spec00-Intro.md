@@ -13,10 +13,11 @@
 
 ## System Overview
 
-This system is a disk-backed, concurrent hash directory for 128-bit keys and values, designed for massive scale, high throughput, and robust crash consistency. The architecture is composed of several tightly integrated components:
+This system is a disk-backed, concurrent hash directory for 256-bit keys and values, designed for massive scale, high throughput, and robust crash consistency. The architecture is composed of several tightly integrated components:
 
 - **Hash Directory & Buckets:** An extensible array of HDF5-backed buckets, each with in-place sorted and unsorted regions for efficient insert and lookup. Buckets split and merge atomically (CoW + WAL) to maintain balance and performance.
-- **Multi-Value Key Handling:** Each HashEntry stores up to two CIDs inline. If more than two values are associated with a key, the entry is promoted to reference an external HDF5 ValueSet (via a SpillPointer). Promotion/demotion is atomic and logged.
+- **Content-Addressed Storage:** All keys and values are 256-bit Content Identifiers (CIDs) from full SHA-256 hashes, stored as 4×64-bit components (high, high_mid, low_mid, low) for maximum cryptographic strength and collision resistance.
+- **Multi-Value Key Handling:** Each HashEntry stores up to two 256-bit CIDs inline. If more than two values are associated with a key, the entry is promoted to reference an external HDF5 ValueSet (via a SpillPointer). Promotion/demotion is atomic and logged.
 - **Semantic Triple Support & Plugin Architecture:** Built-in support for RDF-style (Subject, Predicate, Object) triples with explicit plugin registry for predicate specialization. Unified query interface `query(P, S, O)` dispatches based on bound parameters: single-step for predicate-known patterns (SPO/POS), two-step for subject-known patterns (uses main store routing), and fan-out for object-only patterns (OSP across ~200 predicates max). Explicit plugin registration enables custom data structures (counters, sets, timestamps, geospatial, fulltext, etc.) with performance characteristics (supports_osp/pos flags, concurrency limits) defined in configuration.
 - **Write-Ahead Log (WAL):** All mutating operations (insert, split, merge, delete) are logged in a fixed-width, memory-mapped WAL for atomicity and crash recovery. WAL replay is idempotent and ensures consistency after failure.
 - **Deletion Log & GC:** Deletions are tracked in a dedicated log. Background GC scans for orphans and reclaims space, with all operations being idempotent and safe for crash recovery.
@@ -29,7 +30,7 @@ This system is a disk-backed, concurrent hash directory for 128-bit keys and val
 For canonical data structure diagrams and type definitions, see [Spec 2: Data Types and Structure](spec%202%20-%20Data%20Types%20and%20Structure.md).
 
 **Key Points:**
-- Disk-backed, concurrent hash directory for 128-bit keys/values
+- Disk-backed, concurrent hash directory for 256-bit keys/values (full SHA-256 CIDs)
 - Optimized for scale, throughput, and crash consistency
 - HDF5 SWMR mode for concurrency; extensible hashing for scalability
 - RDF/semantic triple support with explicit predicate plugin registry
