@@ -86,7 +86,7 @@ async def test_multivalue_edge_cases(directory):
     await directory.insert(key, E(1))  # Duplicate
     result = await directory.lookup(key)
     assert result.count(E(1)) >= 1  # At least one present
-    await directory.delete(key, E(2))  # Delete non-existent
+    await directory.delete_value(key, E(2))  # Delete non-existent
     # Should not raise or remove existing value
     assert E(1) in await directory.lookup(key)
 

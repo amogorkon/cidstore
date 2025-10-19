@@ -11,7 +11,15 @@ import zlib
 from asyncio import Event
 from pathlib import Path
 
-from .constants import OP, OpType, OpVer
+from .constants import (
+    CHECKSUM_SIZE,
+    OP,
+    PADDING_SIZE,
+    RECORD_CORE_SIZE,
+    RECORD_SIZE,
+    OpType,
+    OpVer,
+)
 from .logger import get_logger
 from .metrics import (
     PROMETHEUS_AVAILABLE,
@@ -38,10 +46,10 @@ _GLOBAL_WAL_MMAPS: dict[int, mmap.mmap] = {}
 class WAL:
     HEADER_SIZE = 64
     DEFAULT_WAL_SIZE = 64 * 1024 * 1024
-    REC_SIZE = 64
-    RECORD_CORE_SIZE = 50
-    CHECKSUM_SIZE = 4
-    PADDING_SIZE = REC_SIZE - RECORD_CORE_SIZE - CHECKSUM_SIZE
+    REC_SIZE = RECORD_SIZE  # Now 128 bytes for 256-bit CIDs
+    RECORD_CORE_SIZE = RECORD_CORE_SIZE
+    CHECKSUM_SIZE = CHECKSUM_SIZE
+    PADDING_SIZE = PADDING_SIZE
 
     def __init__(
         self,
@@ -467,23 +475,46 @@ class WAL:
         self._wal_seq += 1
         return nanos, self._wal_seq, self.shard_id
 
-    async def log_insert(self, k_high, k_low, v_high, v_low, time=None):
+    async def log_insert(
+        self,
+        k_high,
+        k_high_mid,
+        k_low_mid,
+        k_low,
+        v_high,
+        v_high_mid,
+        v_low_mid,
+        v_low,
+        time=None,
+    ):
         if time is None:
             time = self._next_hybrid_time()
         try:
             logger.info(
-                f"[WAL.log_insert] Called with {k_high=}, {k_low=}, {v_high=}, {v_low=} time={time}"
+                f"[WAL.log_insert] Called with {k_high=}, {k_high_mid=}, {k_low_mid=}, {k_low=}, {v_high=}, {v_high_mid=}, {v_low_mid=}, {v_low=} time={time}"
             )
         except Exception:
             logger.info("[WAL.log_insert] Called")
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0),
-            pack_record(OpVer.NOW, OpType.INSERT, time, k_high, k_low, v_high, v_low),
-            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0, 0, 0, 0, 0),
+            pack_record(
+                OpVer.NOW,
+                OpType.INSERT,
+                time,
+                k_high,
+                k_high_mid,
+                k_low_mid,
+                k_low,
+                v_high,
+                v_high_mid,
+                v_low_mid,
+                v_low,
+            ),
+            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         try:
             logger.info(
-                f"[WAL.log_insert] Inserted record for {k_high=}, {k_low=}, {v_high=}, {v_low=} time={time}"
+                f"[WAL.log_insert] Inserted record for {k_high=}, {k_high_mid=}, {k_low_mid=}, {k_low=}, {v_high=}, {v_high_mid=}, {v_low_mid=}, {v_low=} time={time}"
             )
         except Exception:
             logger.info("[WAL.log_insert] Inserted record")
@@ -528,7 +559,9 @@ class WAL:
             logger.info("[WAL.batch_delete] No items to delete.")
             return
         time_tuple = self._next_hybrid_time()
-        records = [pack_record(OpVer.NOW, OpType.TXN_START, time_tuple, 0, 0, 0, 0)]
+        records = [
+            pack_record(OpVer.NOW, OpType.TXN_START, time_tuple, 0, 0, 0, 0, 0, 0, 0, 0)
+        ]
         records.extend(
             pack_record(
                 OpVer.NOW,
@@ -542,51 +575,82 @@ class WAL:
             for k_high, k_low in items
         )
         records.append(
-            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0)
+            pack_record(
+                OpVer.NOW, OpType.TXN_COMMIT, time_tuple, 0, 0, 0, 0, 0, 0, 0, 0
+            )
         )
         await self.append(records)
         logger.info(f"[WAL.batch_delete] Deleted {items=}")
 
-    async def log_delete(self, k_high, k_low, time=None):
-        logger.info(f"[WAL.log_delete] Called with {k_high=}, {k_low=}")
+    async def log_delete(self, k_high, k_high_mid, k_low_mid, k_low, time=None):
+        logger.info(
+            f"[WAL.log_delete] Called with {k_high=}, {k_high_mid=}, {k_low_mid=}, {k_low=}"
+        )
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0, 0, 0, 0, 0),
             pack_record(
                 OpVer.NOW,
                 OpType.DELETE,
                 time,
                 k_high,
+                k_high_mid,
+                k_low_mid,
                 k_low,
                 0,
                 0,
+                0,
+                0,
             ),
-            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         logger.info(
-            f"[WAL.log_delete] Deleted record for k_high={k_high}, k_low={k_low}"
+            f"[WAL.log_delete] Deleted record for k_high={k_high}, k_high_mid={k_high_mid}, k_low_mid={k_low_mid}, k_low={k_low}"
         )
 
-    async def log_delete_value(self, k_high, k_low, v_high, v_low, time=None):
+    async def log_delete_value(
+        self,
+        k_high,
+        k_high_mid,
+        k_low_mid,
+        k_low,
+        v_high,
+        v_high_mid,
+        v_low_mid,
+        v_low,
+        time=None,
+    ):
         """
         Log the deletion of a specific value from a valueset as a WAL transaction.
         Args:
-            k_high, k_low: The key to delete from.
-            v_high, v_low: The value to delete.
+            k_high, k_high_mid, k_low_mid, k_low: The key to delete from.
+            v_high, v_high_mid, v_low_mid, v_low: The value to delete.
         """
         logger.info(
-            f"[WAL.log_delete_value] Called with k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
+            f"[WAL.log_delete_value] Called with k_high={k_high}, k_high_mid={k_high_mid}, k_low_mid={k_low_mid}, k_low={k_low}, v_high={v_high}, v_high_mid={v_high_mid}, v_low_mid={v_low_mid}, v_low={v_low}"
         )
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0),
-            pack_record(OpVer.NOW, OpType.DELETE, time, k_high, k_low, v_high, v_low),
-            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0, 0, 0, 0, 0),
+            pack_record(
+                OpVer.NOW,
+                OpType.DELETE,
+                time,
+                k_high,
+                k_high_mid,
+                k_low_mid,
+                k_low,
+                v_high,
+                v_high_mid,
+                v_low_mid,
+                v_low,
+            ),
+            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         logger.info(
-            f"[WAL.log_delete_value] Deleted value for k_high={k_high}, k_low={k_low}, v_high={v_high}, v_low={v_low}"
+            f"[WAL.log_delete_value] Deleted value for k_high={k_high}, k_high_mid={k_high_mid}, k_low_mid={k_low_mid}, k_low={k_low}, v_high={v_high}, v_high_mid={v_high_mid}, v_low_mid={v_low_mid}, v_low={v_low}"
         )
 
     async def log_transaction_start(self, time=None):
@@ -603,7 +667,7 @@ class WAL:
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_START, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         logger.info(f"[WAL.log_transaction_start] Logged TXN_START at time={time}")
 
@@ -621,7 +685,7 @@ class WAL:
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_COMMIT, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         logger.info(f"[WAL.log_transaction_commit] Logged TXN_COMMIT at time={time}")
 
@@ -639,7 +703,7 @@ class WAL:
         if time is None:
             time = self._next_hybrid_time()
         await self.append([
-            pack_record(OpVer.NOW, OpType.TXN_ABORT, time, 0, 0, 0, 0),
+            pack_record(OpVer.NOW, OpType.TXN_ABORT, time, 0, 0, 0, 0, 0, 0, 0, 0),
         ])
         logger.info(f"[WAL.log_transaction_abort] Logged TXN_ABORT at time={time}")
 
@@ -649,8 +713,12 @@ def pack_record(
     op_type: OpType,
     time: tuple[int, int, int],
     k_high,
+    k_high_mid,
+    k_low_mid,
     k_low,
     v_high,
+    v_high_mid,
+    v_low_mid,
     v_low,
 ) -> bytes:
     ver = int(version.value)
@@ -659,27 +727,31 @@ def pack_record(
     nanos, seq, shard_id = time
     reserved = 0
     # Compute CRC32 over all fields except checksum.
-    # Pack the core fields first.
+    # Pack the core fields first - now with 4 components per key and value
     packed_core = struct.pack(
-        "<BBQIIQQQQ",
+        "<BBQIIQQQQQQQQ",
         version_op,
         reserved,
         nanos,
         seq,
         shard_id,
         k_high,
+        k_high_mid,
+        k_low_mid,
         k_low,
         v_high,
+        v_high_mid,
+        v_low_mid,
         v_low,
     )
-    # Pad so that checksum is placed at the last 4 bytes of the 64-byte record.
+    # Pad so that checksum is placed at the last 4 bytes of the 128-byte record.
     padding = b"\x00" * WAL.PADDING_SIZE
     # Compute checksum over everything except the final 4 checksum bytes
     checksum = zlib.crc32(packed_core + padding) & 0xFFFFFFFF
     # Construct final record as: packed_core + padding + checksum (4 bytes)
     full_packed: bytes = packed_core + padding + checksum.to_bytes(4, "little")
-    assert len(full_packed) == 64, (
-        f"WAL record must be 64 bytes, got {len(full_packed)}"
+    assert len(full_packed) == 128, (
+        f"WAL record must be 128 bytes, got {len(full_packed)}"
     )
     return full_packed
 
@@ -724,10 +796,14 @@ def unpack_record(rec: bytes) -> object | None:
             seq,
             shard_id,
             k_high,
+            k_high_mid,
+            k_low_mid,
             k_low,
             v_high,
+            v_high_mid,
+            v_low_mid,
             v_low,
-        ) = struct.unpack("<BBQIIQQQQ", packed_core)
+        ) = struct.unpack("<BBQIIQQQQQQQQ", packed_core)
     except struct.error as e:
         logger.error(f"Error unpacking WAL record struct: {e}")
         if PROMETHEUS_AVAILABLE:
@@ -765,14 +841,22 @@ def unpack_record(rec: bytes) -> object | None:
         # Attach a convenience wal_time tuple for end-to-end correlation
         "_wal_time": (nanos, seq, shard_id),
         "wal_time": (nanos, seq, shard_id),
-        # both forms for key/value parts
+        # both forms for key/value parts (256-bit with 4 components)
         "key_high": k_high,
+        "key_high_mid": k_high_mid,
+        "key_low_mid": k_low_mid,
         "key_low": k_low,
         "k_high": k_high,
+        "k_high_mid": k_high_mid,
+        "k_low_mid": k_low_mid,
         "k_low": k_low,
         "value_high": v_high,
+        "value_high_mid": v_high_mid,
+        "value_low_mid": v_low_mid,
         "value_low": v_low,
         "v_high": v_high,
+        "v_high_mid": v_high_mid,
+        "v_low_mid": v_low_mid,
         "v_low": v_low,
         "checksum": stored_checksum,
     })

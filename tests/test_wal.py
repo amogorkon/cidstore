@@ -126,16 +126,24 @@ def test_pack_record_and_unpack_record_roundtrip():
     version = OpVer.NOW
     op_type = OpType.INSERT
     time_tuple = (int(time.time_ns()), 123, 1)
+    # 256-bit key (4 components)
     key_high = 0x1234567890ABCDEF
+    key_high_mid = 0x1122334455667788
+    key_low_mid = 0x99AABBCCDDEEFF00
     key_low = 0x0FEDCBA098765432
+    # 256-bit value (4 components)
     value_high = 0x1111222233334444
+    value_high_mid = 0xAAAABBBBCCCCDDDD
+    value_low_mid = 0xEEEEFFFF00001111
     value_low = 0x5555666677778888
 
     rec_bytes = pack_record(
-        version, op_type, time_tuple, key_high, key_low, value_high, value_low
+        version, op_type, time_tuple, 
+        key_high, key_high_mid, key_low_mid, key_low, 
+        value_high, value_high_mid, value_low_mid, value_low
     )
     assert isinstance(rec_bytes, bytes)
-    assert len(rec_bytes) == 64
+    assert len(rec_bytes) == 128  # Doubled for 256-bit CIDs
 
     rec_dict = unpack_record(rec_bytes)
     assert rec_dict is not None
@@ -145,8 +153,12 @@ def test_pack_record_and_unpack_record_roundtrip():
     assert rec_dict["seq"] == time_tuple[1]
     assert rec_dict["shard_id"] == time_tuple[2]
     assert rec_dict["key_high"] == key_high
+    assert rec_dict["key_high_mid"] == key_high_mid
+    assert rec_dict["key_low_mid"] == key_low_mid
     assert rec_dict["key_low"] == key_low
     assert rec_dict["value_high"] == value_high
+    assert rec_dict["value_high_mid"] == value_high_mid
+    assert rec_dict["value_low_mid"] == value_low_mid
     assert rec_dict["value_low"] == value_low
     assert isinstance(rec_dict["checksum"], int)
 
@@ -164,13 +176,20 @@ def test_unpack_record_bad_checksum():
     version = OpVer.NOW
     op_type = OpType.INSERT
     time_tuple = (int(time.time_ns()), 123, 1)
+    # 256-bit key and value (4 components each)
     key_high = 1
+    key_high_mid = 0
+    key_low_mid = 0
     key_low = 2
     value_high = 3
+    value_high_mid = 0
+    value_low_mid = 0
     value_low = 4
     rec_bytes = bytearray(
         pack_record(
-            version, op_type, time_tuple, key_high, key_low, value_high, value_low
+            version, op_type, time_tuple, 
+            key_high, key_high_mid, key_low_mid, key_low, 
+            value_high, value_high_mid, value_low_mid, value_low
         )
     )
     # Corrupt the checksum

@@ -130,8 +130,8 @@ class Storage:
         # In-memory worker-local index to make writes immediately visible to
         # subsequent reads executed on the worker thread. This avoids relying
         # solely on filesystem/HDF5 propagation semantics which can vary by
-        # platform and VFD. Key: (bucket_name, key_high, key_low) -> numpy entry
-        self._mem_index: dict[tuple[str, int, int], object] = {}
+        # platform and VFD. Key: (bucket_name, key_high, key_high_mid, key_low_mid, key_low) -> numpy entry
+        self._mem_index: dict[tuple[str, int, int, int, int], object] = {}
         # Separate lock to guard the in-memory mem-index. Using a dedicated
         # lock avoids circular wait between the HDF5-worker (which may need
         # the _lock to perform filesystem operations) and callers that only
@@ -142,7 +142,7 @@ class Storage:
         # This helps avoid overwriting newer worker-published entries with
         # stale reads from separate file handles. Keyed by the same tuple as
         # _mem_index; value is either a WAL-time tag or None when unavailable.
-        self._mem_index_wal_times: dict[tuple[str, int, int], object] = {}
+        self._mem_index_wal_times: dict[tuple[str, int, int, int, int], object] = {}
 
         # Monotonic publish sequence counter for diagnostics
         # Incremented while holding _mem_index_lock so logs can be correlated
@@ -300,61 +300,12 @@ class Storage:
 
             with suppress(Exception):
                 self.flush()
-                self.file.close()
-        except (OSError, RuntimeError) as e:
-            raise RuntimeError(f"Failed to close HDF5 file: {e}") from e
-        finally:
-            # Signal worker thread to exit and wait for it
-            try:
-                # Signal shutdown via event first so worker/dispatcher loops
-                # using timeout-based gets can exit promptly.
-                try:
-                    self._shutdown_event.set()
-                except Exception:
-                    pass
-                # Best-effort: put sentinels to unblock any blocking get() calls
-                try:
-                    if hasattr(self, "_worker_queue"):
-                        self._worker_queue.put(None)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, "_result_queue"):
-                        self._result_queue.put(None)
-                except Exception:
-                    pass
-                # Wait briefly for threads to exit
-                try:
-                    if (
-                        hasattr(self, "_worker_thread")
-                        and self._worker_thread is not None
-                    ):
-                        self._worker_thread.join(timeout=5)
-                except Exception:
-                    pass
-                try:
-                    if (
-                        hasattr(self, "_result_dispatcher_thread")
-                        and self._result_dispatcher_thread is not None
-                    ):
-                        self._result_dispatcher_thread.join(timeout=5)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        # Remove temporary file if we created one
-        try:
-            if getattr(self, "_tempfile_path", None) is not None:
-                try:
-                    os.unlink(str(self._tempfile_path))
-                except Exception:
-                    pass
         except Exception:
+            # Ignore close/flush errors
             pass
 
     def _worker_loop(self):
-        """Worker thread loop that executes synchronous HDF5 tasks.
+        """Worker thread main loop: execute queued HDF5 tasks.
 
         Each queue item is either None (shutdown) or a tuple
         (callable, args, kwargs, asyncio_loop, asyncio_future).
@@ -362,6 +313,7 @@ class Storage:
         asyncio_loop.call_soon_threadsafe to set the result/exception
         on the provided asyncio future.
         """
+
         # Open a persistent HDF5 File in the worker thread so all
         # synchronous HDF5 operations executed here reuse the same
         # file handle. This avoids multiple writer/reader handles and
@@ -901,17 +853,16 @@ class Storage:
         # flushing/fsync above) to avoid nested lock acquisitions.
         if published_entry is not None:
             try:
-                try:
-                    self._publish_mem_index(
-                        bucket_name,
-                        int(op.k_high),
-                        int(op.k_low),
-                        published_entry,
-                        published_tag,
-                        origin="apply_delete",
-                    )
-                except Exception:
-                    pass
+                self._publish_mem_index(
+                    bucket_name,
+                    int(op.k_high),
+                    int(getattr(op, "k_high_mid", 0)),
+                    int(getattr(op, "k_low_mid", 0)),
+                    int(op.k_low),
+                    published_entry,
+                    published_tag,
+                    origin="apply_delete",
+                )
             except Exception:
                 pass
 
@@ -988,7 +939,7 @@ class Storage:
                     logger.info(
                         f"_apply_insert_sync: creating new entry for key=({op.k_high},{op.k_low})"
                     )
-                    entry = new_entry(op.k_high, op.k_low)
+                    entry = new_entry(op.k_high, op.k_high_mid, op.k_low_mid, op.k_low)
             else:
                 # Fallback: per-item read
                 total = bucket_ds.shape[0]
@@ -1008,7 +959,7 @@ class Storage:
                     logger.info(
                         f"_apply_insert_sync: creating new entry for key=({op.k_high},{op.k_low}) (fallback path)"
                     )
-                    entry = new_entry(op.k_high, op.k_low)
+                    entry = new_entry(op.k_high, op.k_high_mid, op.k_low_mid, op.k_low)
 
             assert entry.dtype == HASH_ENTRY_DTYPE, "Entry not HASH_ENTRY_DTYPE"
             # Extract WAL hybrid-time tag from the op if available so
@@ -1039,6 +990,8 @@ class Storage:
                     "_apply_insert_sync: using slot0 for new entry (both slots empty)"
                 )
                 entry["slots"][0]["high"] = op.v_high
+                entry["slots"][0]["high_mid"] = op.v_high_mid
+                entry["slots"][0]["low_mid"] = op.v_low_mid
                 entry["slots"][0]["low"] = op.v_low
                 # If we found an existing slot index for this key, update it in-place
                 if entry_idx is not None:
@@ -1087,6 +1040,8 @@ class Storage:
                     "_apply_insert_sync: using slot1 for existing entry (slot0 occupied)"
                 )
                 entry["slots"][1]["high"] = op.v_high
+                entry["slots"][1]["high_mid"] = op.v_high_mid
+                entry["slots"][1]["low_mid"] = op.v_low_mid
                 entry["slots"][1]["low"] = op.v_low
                 logger.debug(
                     f"_apply_insert_sync: updating existing entry at idx={entry_idx} to set slot1 for key=({op.k_high},{op.k_low}) value=({op.v_high},{op.v_low})"
@@ -1120,6 +1075,8 @@ class Storage:
                         op.k_high,
                         op.k_low,
                         op.v_high,
+                        op.v_high_mid,
+                        op.v_low_mid,
                         op.v_low,
                         tag,
                     )
@@ -1128,7 +1085,14 @@ class Storage:
                     # _apply_insert_spill_sync operates on the entry and value parts;
                     # do not pass the File handle `f` which this helper does not expect.
                     # Pass wal_time tag into spill append helper when available
-                    self._apply_insert_spill_sync(entry, op.v_high, op.v_low, tag)
+                    self._apply_insert_spill_sync(
+                        entry,
+                        op.v_high,
+                        op.v_high_mid,
+                        op.v_low_mid,
+                        op.v_low,
+                        tag,
+                    )
 
             # Ensure changes are flushed so separate File handles (opened
             # by readers on other threads) observe the updates.
@@ -1160,7 +1124,7 @@ class Storage:
                 except Exception:
                     tag = None
                 logger.info(
-                    f"_apply_insert_sync: updating mem_index for key=({bucket_name}, {int(op.k_high)}, {int(op.k_low)}) with slots={entry['slots']} wal_tag={tag}"
+                    f"_apply_insert_sync: updating mem_index for key=({bucket_name}, {int(op.k_high)}, {int(op.k_high_mid)}, {int(op.k_low_mid)}, {int(op.k_low)}) with slots={entry['slots']} wal_tag={tag}"
                 )
                 # Synchronously publish mem-index under mem_index_lock to ensure
                 # deterministic visibility to other threads. Acquiring the
@@ -1175,6 +1139,8 @@ class Storage:
                         self._publish_mem_index(
                             bucket_name,
                             int(op.k_high),
+                            int(op.k_high_mid),
+                            int(op.k_low_mid),
                             int(op.k_low),
                             entry_copy,
                             tag,
@@ -1196,17 +1162,17 @@ class Storage:
         assert assumption(bucket_ds, Dataset)
         return bucket_ds
 
-    def find_entry_in_bucket_sync(self, bucket_name: str, key_high: int, key_low: int):
+    def find_entry_in_bucket_sync(self, bucket_name: str, key_high: int, key_high_mid: int, key_low_mid: int, key_low: int):
         """Find and return a (copied) entry in the given bucket or None."""
         # First consult the worker-local in-memory index for deterministic
         # in-process visibility of recent writes executed on the worker.
         try:
             with self._mem_index_lock:
-                m = self._mem_index.get((bucket_name, int(key_high), int(key_low)))
+                m = self._mem_index.get((bucket_name, int(key_high), int(key_high_mid), int(key_low_mid), int(key_low)))
                 if m is not None:
                     try:
                         logger.debug(
-                            f"find_entry_in_bucket_sync: mem_index HIT for {(bucket_name, int(key_high), int(key_low))}, entry={m}"
+                            f"find_entry_in_bucket_sync: mem_index HIT for {(bucket_name, int(key_high), int(key_high_mid), int(key_low_mid), int(key_low))}, entry={m}"
                         )
                     except Exception:
                         pass
@@ -1363,11 +1329,18 @@ class Storage:
     def get_values_sync(self, entry) -> list[E]:
         """Synchronous get_values (safe to call on HDF5 worker thread)."""
         slots = entry["slots"]
-        # Spill mode: slot0 is zero and slot1 points to a valueset dataset
+        # Spill mode: slot0 is all zeros and slot1 points to a valueset dataset
         if (
             int(slots[0]["high"]) == 0
+            and int(slots[0]["high_mid"]) == 0
+            and int(slots[0]["low_mid"]) == 0
             and int(slots[0]["low"]) == 0
-            and (int(slots[1]["high"]) != 0 or int(slots[1]["low"]) != 0)
+            and (
+                int(slots[1]["high"]) != 0
+                or int(slots[1]["high_mid"]) != 0
+                or int(slots[1]["low_mid"]) != 0
+                or int(slots[1]["low"]) != 0
+            )
         ):
             slot = slots[1]
             bucket_id = int(slot["high"])
@@ -1404,8 +1377,10 @@ class Storage:
                 ):
                     raw = [raw]
 
+                # Each element in 'raw' is structured with fields high, high_mid, low_mid, low
                 decoded = [
-                    E.from_int((int(v["high"]) << 64) | int(v["low"])) for v in raw
+                    E(int(v["high"]), int(v["high_mid"]), int(v["low_mid"]), int(v["low"]))
+                    for v in raw
                 ]
                 try:
                     logger.debug(
@@ -1425,13 +1400,15 @@ class Storage:
         values = []
         for slot in slots:
             high = int(slot["high"])
+            high_mid = int(slot["high_mid"])
+            low_mid = int(slot["low_mid"])
             low = int(slot["low"])
-            # Skip empty slots (both high and low zero) which represent
+            # Skip empty slots (all components zero) which represent
             # unused inline value locations. Returning E(0) for empty
             # slots produces spurious values after recovery.
-            if high == 0 and low == 0:
+            if high == 0 and high_mid == 0 and low_mid == 0 and low == 0:
                 continue
-            values.append(E.from_int((high << 64) | low))
+            values.append(E(high, high_mid, low_mid, low))
         try:
             logger.debug(
                 f"get_values_sync: returning {len(values)} inline values for entry key=({int(entry['key_high'])},{int(entry['key_low'])})"
@@ -1440,22 +1417,34 @@ class Storage:
             pass
         return values
 
-    async def find_entry(self, bucket_name: str, key_high: int, key_low: int):
+    async def find_entry(self, bucket_name: str, key_high: int, key_high_mid: int, key_low_mid: int, key_low: int):
         return await self._submit_task(
-            self.find_entry_in_bucket_sync, bucket_name, key_high, key_low
+            self.find_entry_in_bucket_sync, bucket_name, key_high, key_high_mid, key_low_mid, key_low
         )
 
     async def get_values_async(self, entry):
         return await self._submit_task(self.get_values_sync, entry)
 
-    async def ensure_mem_index(self, bucket_name: str, key_high: int, key_low: int):
+    async def ensure_mem_index(
+        self,
+        bucket_name: str,
+        key_high: int,
+        key_high_mid: int,
+        key_low_mid: int,
+        key_low: int,
+    ):
         """Ensure the worker-local mem-index contains the canonical entry for the given key.
 
         This runs on the HDF5 worker thread and deterministically reads the canonical
         bucket dataset entry and stores a numpy.copy into self._mem_index under lock.
         """
         return await self._submit_task(
-            self._ensure_mem_index_sync, bucket_name, key_high, key_low
+            self._ensure_mem_index_sync,
+            bucket_name,
+            key_high,
+            key_high_mid,
+            key_low_mid,
+            key_low,
         )
 
     def _worker_noop_sync(self):
@@ -1467,7 +1456,14 @@ class Storage:
         previously-submitted tasks have completed (testing/determinism helper)."""
         return await self._submit_task(self._worker_noop_sync)
 
-    def _ensure_mem_index_sync(self, bucket_name: str, key_high: int, key_low: int):
+    def _ensure_mem_index_sync(
+        self,
+        bucket_name: str,
+        key_high: int,
+        key_high_mid: int,
+        key_low_mid: int,
+        key_low: int,
+    ):
         """Synchronous helper executed on the worker thread to update mem-index."""
         f = getattr(self, "_worker_file", None)
         opened_here = False
@@ -1502,9 +1498,12 @@ class Storage:
                     found_entry = None
                     for i in range(total):
                         e = bucket_ds[i]
-                        if int(e["key_high"]) == int(key_high) and int(
-                            e["key_low"]
-                        ) == int(key_low):
+                        if (
+                            int(e["key_high"]) == int(key_high)
+                            and int(e.get("key_high_mid", 0)) == int(getattr(key_high, 'high_mid', 0) if hasattr(key_high, 'high_mid') else 0)
+                            and int(e.get("key_low_mid", 0)) == int(getattr(key_low, 'low_mid', 0) if hasattr(key_low, 'low_mid') else 0)
+                            and int(e["key_low"]) == int(key_low)
+                        ):
                             found_entry = np.copy(e)
                             break
                     # Lightweight instrumentation: log scan progress occasionally
@@ -1545,7 +1544,7 @@ class Storage:
                                 except Exception:
                                     snap = None
                                 logger.info(
-                                    f"_ensure_mem_index_sync: publishing mem_index for key={(bucket_name, int(key_high), int(key_low))} attempts={attempts} swmr={swmr_flag} snapshot={snap}"
+                                    f"_ensure_mem_index_sync: publishing mem_index for key={(bucket_name, int(key_high), int(getattr(key_high, 'high_mid', 0) if hasattr(key_high, 'high_mid') else 0), int(getattr(key_low, 'low_mid', 0) if hasattr(key_low, 'low_mid') else 0), int(key_low))} attempts={attempts} swmr={swmr_flag} snapshot={snap}"
                                 )
                             except Exception:
                                 pass
@@ -1555,11 +1554,15 @@ class Storage:
                             # overwriting more recent data from _apply_insert_sync
                             try:
                                 with self._mem_index_lock:
-                                    existing = self._mem_index.get((
-                                        bucket_name,
-                                        int(key_high),
-                                        int(key_low),
-                                    ))
+                                    existing = self._mem_index.get(
+                                        (
+                                            bucket_name,
+                                            int(key_high),
+                                            int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
+                                            int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
+                                            int(key_low),
+                                        )
+                                    )
                                     # If there is no existing in-memory entry, publish
                                     # the canonical file entry into the mem-index.
                                     if existing is None:
@@ -1568,6 +1571,8 @@ class Storage:
                                             self._publish_mem_index(
                                                 bucket_name,
                                                 int(key_high),
+                                                int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
+                                                int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
                                                 int(key_low),
                                                 published_entry,
                                                 None,
@@ -1583,6 +1588,8 @@ class Storage:
                                                     (
                                                         bucket_name,
                                                         int(key_high),
+                                                        int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
+                                                        int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
                                                         int(key_low),
                                                     )
                                                 ] = published_entry
@@ -1593,6 +1600,8 @@ class Storage:
                                                     (
                                                         bucket_name,
                                                         int(key_high),
+                                                        int(getattr(key_high, "high_mid", 0) if hasattr(key_high, "high_mid") else 0),
+                                                        int(getattr(key_low, "low_mid", 0) if hasattr(key_low, "low_mid") else 0),
                                                         int(key_low),
                                                     )
                                                 ] = None
@@ -1698,6 +1707,8 @@ class Storage:
         key_high: int,
         key_low: int,
         value_high: int,
+        value_high_mid: int,
+        value_low_mid: int,
         value_low: int,
         wal_time=None,
     ) -> None:
@@ -1713,6 +1724,8 @@ class Storage:
             key_high,
             key_low,
             value_high,
+            value_high_mid,
+            value_low_mid,
             value_low,
             wal_time,
         )
@@ -1727,6 +1740,8 @@ class Storage:
         key_high: int,
         key_low: int,
         value_high: int,
+        value_high_mid: int,
+        value_low_mid: int,
         value_low: int,
         wal_time=None,
     ) -> None:
@@ -1740,12 +1755,22 @@ class Storage:
             with self._lock:
                 slots = bucket_ds[entry_idx]["slots"]
 
-                def slot_to_int(slot):
-                    return (int(slot["high"]) << 64) | int(slot["low"])
+                def slot_to_tuple(slot):
+                    return (
+                        int(slot["high"]),
+                        int(slot["high_mid"]),
+                        int(slot["low_mid"]),
+                        int(slot["low"]),
+                    )
 
-                value1 = slot_to_int(slots[0])
-                value2 = slot_to_int(slots[1])
-                new_value = (value_high << 64) | value_low
+                value1 = slot_to_tuple(slots[0])
+                value2 = slot_to_tuple(slots[1])
+                new_value = (
+                    int(value_high),
+                    int(value_high_mid),
+                    int(value_low_mid),
+                    int(value_low),
+                )
                 values = [value1, value2, new_value]
 
                 sp_group = self._get_valueset_group_file(f)
@@ -1754,19 +1779,52 @@ class Storage:
                 if ds_name in sp_group:
                     del sp_group[ds_name]
 
-                spill_dtype = np.dtype([("high", "<u8"), ("low", "<u8")])
+                spill_dtype = np.dtype(
+                    [
+                        ("high", "<u8"),
+                        ("high_mid", "<u8"),
+                        ("low_mid", "<u8"),
+                        ("low", "<u8"),
+                    ]
+                )
 
                 ds = sp_group.create_dataset(
                     ds_name, shape=(len(values),), maxshape=(None,), dtype=spill_dtype
                 )
-                encoded = [(int(v) >> 64, int(v) & 0xFFFFFFFFFFFFFFFF) for v in values]
+                encoded = []
+                for v in values:
+                    try:
+                        if isinstance(v, tuple) and len(v) == 4:
+                            h, hm, lm, l = (int(x) for x in v)
+                        elif isinstance(v, tuple) and len(v) == 2:
+                            h = int(v[0])
+                            hm = 0
+                            lm = 0
+                            l = int(v[1])
+                        else:
+                            iv = int(v)
+                            mask = (1 << 64) - 1
+                            l = iv & mask
+                            lm = (iv >> 64) & mask
+                            hm = (iv >> 128) & mask
+                            h = (iv >> 192) & mask
+                    except Exception:
+                        h = 0
+                        hm = 0
+                        lm = 0
+                        l = 0
+                    encoded.append((h, hm, lm, l))
 
                 ds[:] = encoded
 
-                # Store the dataset name as the spill pointer (as high/low for compatibility)
+                # Store the dataset name as the spill pointer (compact compatibility):
                 entry["slots"][0]["high"] = 0
+                entry["slots"][0]["high_mid"] = 0
+                entry["slots"][0]["low_mid"] = 0
                 entry["slots"][0]["low"] = 0
                 entry["slots"][1]["high"] = bucket_id
+                entry["slots"][1]["high_mid"] = 0
+                entry["slots"][1]["low_mid"] = 0
                 entry["slots"][1]["low"] = key_high
 
                 bucket_ds[entry_idx] = entry
@@ -1809,6 +1867,8 @@ class Storage:
                         self._publish_mem_index(
                             bucket_name,
                             int(key_high),
+                            int(getattr(key_high, 'high_mid', 0) if hasattr(key_high, 'high_mid') else 0),
+                            int(getattr(key_low, 'low_mid', 0) if hasattr(key_low, 'low_mid') else 0),
                             int(key_low),
                             published_entry,
                             wal_time,
@@ -1839,6 +1899,8 @@ class Storage:
         self,
         bucket_name: str,
         k_high: int,
+        k_high_mid: int,
+        k_low_mid: int,
         k_low: int,
         entry,
         wal_time=None,
@@ -1860,16 +1922,16 @@ class Storage:
         # Primary: set under the mem-index lock for atomicity
         try:
             with self._mem_index_lock:
-                key = (bucket_name, int(k_high), int(k_low))
-                # If incoming wal_time is None (a canonical file-read publish),
-                # avoid overwriting an existing worker-published entry that
-                # already has a WAL time. Worker-originated publishes carry a
-                # wal_time and must take precedence over file-read publications
-                # to prevent visibility races. If incoming wal_time is not None,
-                # always publish (it represents a newer WAL-applied update).
+                key = (
+                    bucket_name,
+                    int(k_high),
+                    int(k_high_mid),
+                    int(k_low_mid),
+                    int(k_low),
+                )
+                # Existing WAL time (if any) for this in-memory entry
                 existing_time = self._mem_index_wal_times.get(key)
-                # Extra diagnostics: capture existing entry and provide
-                # an explicit debug log showing existing vs incoming WAL times
+                # Extra diagnostics: capture existing entry
                 try:
                     existing_entry = self._mem_index.get(key)
                 except Exception:
@@ -1885,41 +1947,23 @@ class Storage:
                         )
                     except Exception:
                         pass
+
                 # If not forcing, and incoming wal_time is None (a file-read),
-                # avoid overwriting an existing worker-published entry that
-                # already has a WAL time. Worker-originated publishes carry a
-                # wal_time and must take precedence over file-read
-                # publications to prevent visibility races. If `force` is True
-                # the caller explicitly requests overwriting regardless of
-                # existing WAL tags (used when the canonical file differs).
-                # If the incoming publication originates from a file-read
-                # (wal_time is None) and there is already an in-memory
-                # entry for this key, do not overwrite it. This is a
-                # conservative rule that ensures worker-originated
-                # publications (which make the mem-index visible) are
-                # never silently clobbered by later file reads. The prior
-                # implementation only skipped when an explicit WAL-time was
-                # present; however races can leave `existing_time` unset
-                # while the mem-index entry exists. Avoid that class of
-                # race by checking existence of the entry itself.
+                # avoid overwriting an existing worker-published entry.
                 if not force and wal_time is None and key in self._mem_index:
-                    # Skip overwrite; log diagnostic with sequence for correlation
                     try:
                         self._publish_seq += 1
                         seq = int(self._publish_seq)
                     except Exception:
                         seq = None
-                    # Caller attribution for diagnostics
                     try:
                         caller = inspect.stack()[1]
-                        caller_info = (
-                            f"{caller.filename}:{caller.lineno}:{caller.function}"
-                        )
+                        caller_info = f"{caller.filename}:{caller.lineno}:{caller.function}"
                     except Exception:
                         caller_info = None
                     try:
                         logger.info(
-                            f"PUBLISH_MEM_INDEX: seq={seq} key={key} wal_time={wal_time} origin={origin} under_lock=True SKIPPED_OVERWRITE existing_wal_time={existing_time} caller={caller_info} slots={entry_copy['slots']}"
+                            f"PUBLISH_MEM_INDEX: seq={seq} key={key} wal_time={wal_time} origin={origin} under_lock=True SKIPPED_OVERWRITE existing_wal_time={existing_time} caller={caller_info} slots={entry_copy.get('slots', None)}"
                         )
                     except Exception:
                         try:
@@ -1930,9 +1974,6 @@ class Storage:
                             pass
                     return
 
-                # Otherwise perform publish (either new WAL-tagged entry or
-                # file-read when no existing WAL-tagged entry present or when
-                # caller forces overwrite).
                 # Log previous entry for correlation before overwrite
                 try:
                     prev = self._mem_index.get(key)
@@ -1940,7 +1981,7 @@ class Storage:
                     prev = None
                 try:
                     logger.debug(
-                        f"PUBLISH_MEM_INDEX.DEBUG_WRITE: key={key} origin={origin} prev_wal_time={existing_time} prev_slots={getattr(prev, 'slots', None)} -> new_wal_time={wal_time} new_slots={entry_copy['slots']}"
+                        f"PUBLISH_MEM_INDEX.DEBUG_WRITE: key={key} origin={origin} prev_wal_time={existing_time} prev_slots={getattr(prev, 'slots', None)} -> new_wal_time={wal_time} new_slots={entry_copy.get('slots', None)}"
                     )
                 except Exception:
                     try:
@@ -1955,14 +1996,11 @@ class Storage:
                     self._mem_index_wal_times[key] = wal_time
                 except Exception:
                     pass
-                # Increment publish sequence while still holding the lock so
-                # sequence numbers reflect the atomic publication ordering.
                 try:
                     self._publish_seq += 1
                     seq = int(self._publish_seq)
                 except Exception:
                     seq = None
-                # Caller attribution for diagnostics
                 try:
                     caller = inspect.stack()[1]
                     caller_info = f"{caller.filename}:{caller.lineno}:{caller.function}"
@@ -1970,7 +2008,7 @@ class Storage:
                     caller_info = None
                 try:
                     logger.info(
-                        f"PUBLISH_MEM_INDEX: seq={seq} key={key} wal_time={wal_time} origin={origin} under_lock=True caller={caller_info} slots={entry_copy['slots']}"
+                        f"PUBLISH_MEM_INDEX: seq={seq} key={key} wal_time={wal_time} origin={origin} under_lock=True caller={caller_info} slots={entry_copy.get('slots', None)}"
                     )
                 except Exception:
                     try:
@@ -1984,44 +2022,44 @@ class Storage:
             # Retry acquiring the lock in case of transient errors
             try:
                 with self._mem_index_lock:
-                    self._mem_index[(bucket_name, int(k_high), int(k_low))] = entry_copy
+                    key = (
+                        bucket_name,
+                        int(k_high),
+                        int(k_high_mid),
+                        int(k_low_mid),
+                        int(k_low),
+                    )
+                    self._mem_index[key] = entry_copy
                     try:
-                        self._mem_index_wal_times[
-                            (bucket_name, int(k_high), int(k_low))
-                        ] = wal_time
+                        self._mem_index_wal_times[key] = wal_time
                     except Exception:
                         pass
                 try:
-                    try:
-                        self._publish_seq += 1
-                        seq = int(self._publish_seq)
-                    except Exception:
-                        seq = None
+                    self._publish_seq += 1
+                    seq = int(self._publish_seq)
+                except Exception:
+                    seq = None
+                try:
                     logger.info(
-                        f"PUBLISH_MEM_INDEX: seq={seq} key={(bucket_name, int(k_high), int(k_low))} wal_time={wal_time} origin={origin} under_lock=True (retry) slots={entry_copy['slots']}"
+                        f"PUBLISH_MEM_INDEX: seq={seq} key={key} wal_time={wal_time} origin={origin} under_lock=True (retry) slots={entry_copy.get('slots', None)}"
                     )
                 except Exception:
                     try:
                         logger.info(
-                            f"PUBLISH_MEM_INDEX: key={(bucket_name, int(k_high), int(k_low))} wal_time={wal_time} origin={origin} under_lock=True (retry)"
+                            f"PUBLISH_MEM_INDEX: key={key} wal_time={wal_time} origin={origin} under_lock=True (retry)"
                         )
                     except Exception:
                         pass
                 return
             except Exception:
-                # Last-resort: unsynchronized best-effort assignment
-                # Avoid performing unsynchronized writes here which can
-                # overwrite worker-published entries from other threads.
-                # Log a diagnostic message and return; callers may retry
-                # or rely on canonical ensure_mem_index to publish later.
                 try:
                     logger.warning(
-                        f"PUBLISH_MEM_INDEX: key={(bucket_name, int(k_high), int(k_low))} wal_time={wal_time} origin={origin} under_lock=False SKIPPED_WRITE"
+                        f"PUBLISH_MEM_INDEX: key={(bucket_name, int(k_high), int(k_high_mid), int(k_low_mid), int(k_low))} wal_time={wal_time} origin={origin} under_lock=False SKIPPED_WRITE"
                     )
                 except Exception:
                     try:
                         logger.warning(
-                            f"PUBLISH_MEM_INDEX: key={(bucket_name, int(k_high), int(k_low))} wal_time={wal_time} origin={origin} under_lock=False SKIPPED_WRITE"
+                            f"PUBLISH_MEM_INDEX: key={(bucket_name, int(k_high), int(k_high_mid), int(k_low_mid), int(k_low))} wal_time={wal_time} origin={origin} under_lock=False SKIPPED_WRITE"
                         )
                     except Exception:
                         pass
@@ -2074,7 +2112,12 @@ class Storage:
                     raw = [raw]
 
                 decoded = [
-                    E.from_int((int(v["high"]) << 64) | int(v["low"]))
+                    E.from_int(
+                        (int(v["high"]) << 192)
+                        | (int(v.get("high_mid", 0)) << 128)
+                        | (int(v.get("low_mid", 0)) << 64)
+                        | int(v["low"])
+                    )
                     for v in raw
                     if int(v["high"]) != 0 or int(v["low"]) != 0
                 ]
@@ -2091,28 +2134,45 @@ class Storage:
                         f.close()
                     except Exception:
                         pass
-        # Inline mode: slots are structured arrays with 'high' and 'low'
+        # Inline mode: slots are structured arrays with 4 components each
         values = []
         for slot in slots:
             high = int(slot["high"])
+            high_mid = int(slot.get("high_mid", 0))
+            low_mid = int(slot.get("low_mid", 0))
             low = int(slot["low"])
-            if high == 0 and low == 0:
+            # Skip empty slots (all zeros)
+            if high == 0 and high_mid == 0 and low_mid == 0 and low == 0:
                 continue
-            values.append(E.from_int((high << 64) | low))
+            # Reconstruct 256-bit value from 4 components
+            value_int = (high << 192) | (high_mid << 128) | (low_mid << 64) | low
+            values.append(E.from_int(value_int))
         return values
 
-    async def apply_insert_spill(self, entry, value_high: int, value_low: int) -> None:
+    async def apply_insert_spill(self, entry, value_high: int, value_high_mid: int, value_low_mid: int, value_low: int) -> None:
         """
         Insert a new value into an existing spill (valueset) dataset for the given entry.
         """
         # Delegate the actual HDF5 operations to the worker thread so
         # we do not touch h5py objects on the asyncio/main thread.
         await self._submit_task(
-            self._apply_insert_spill_sync, entry, value_high, value_low, None
+            self._apply_insert_spill_sync,
+            entry,
+            value_high,
+            value_high_mid,
+            value_low_mid,
+            value_low,
+            None,
         )
 
     def _apply_insert_spill_sync(
-        self, entry, value_high: int, value_low: int, wal_time=None
+        self,
+        entry,
+        value_high: int,
+        value_high_mid: int,
+        value_low_mid: int,
+        value_low: int,
+        wal_time=None,
     ) -> None:
         """Synchronous spill-append implementation (runs on HDF5 worker thread)."""
         slot = entry["slots"][1]
@@ -2148,8 +2208,13 @@ class Storage:
             # with other potential concurrent writes to the same dataset.
             with self._lock:
                 current = ds[:]
-                # Prepare new value as (high, low)
-                new_value = (int(value_high), int(value_low))
+                # Prepare new value as 4-tuple
+                new_value = (
+                    int(value_high),
+                    int(value_high_mid),
+                    int(value_low_mid),
+                    int(value_low),
+                )
                 # Append new value
                 new_len = len(current) + 1
                 ds.resize((new_len,))
@@ -2206,22 +2271,30 @@ class Storage:
                                     f"_apply_insert_spill_sync: updating mem_index for {(bucket_name, k_high, k_low)} after spill append; canonical_entry_index={i}"
                                 )
                                 try:
+                                    # Prefer to publish using the canonical mids stored
+                                    # in the bucket dataset entry (if present).
+                                    self._publish_mem_index(
+                                        bucket_name,
+                                        int(e.get("key_high", k_high)),
+                                        int(e.get("key_high_mid", 0)),
+                                        int(e.get("key_low_mid", 0)),
+                                        int(e.get("key_low", k_low)),
+                                        e,
+                                        wal_time,
+                                        origin="apply_insert_spill",
+                                    )
+                                except Exception:
                                     try:
+                                        # best-effort fallback: publish without mids
                                         self._publish_mem_index(
                                             bucket_name,
                                             k_high,
+                                            0,
+                                            0,
                                             k_low,
                                             e,
                                             wal_time,
                                             origin="apply_insert_spill",
-                                        )
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    try:
-                                        # best-effort fallback
-                                        self._publish_mem_index(
-                                            bucket_name, k_high, k_low, e, wal_time
                                         )
                                     except Exception:
                                         pass
@@ -2236,9 +2309,12 @@ class Storage:
                 if not updated:
                     try:
                         try:
+                            # Publish without mids as a best-effort fallback
                             self._publish_mem_index(
                                 bucket_name,
                                 k_high,
+                                0,
+                                0,
                                 k_low,
                                 entry,
                                 wal_time,
@@ -2248,11 +2324,13 @@ class Storage:
                             pass
                     except Exception:
                         try:
+                            # Final fallback: try to find any existing mem_index
+                            # keys that match high/low and re-use their mids.
                             for k in list(self._mem_index.keys()):
-                                if k[1] == k_high and k[2] == k_low:
+                                if k[1] == k_high and k[4] == k_low:
                                     try:
                                         self._publish_mem_index(
-                                            k[0], k[1], k[2], entry, wal_time
+                                            k[0], k[1], k[2], k[3], k[4], entry, wal_time
                                         )
                                     except Exception:
                                         pass
@@ -2271,10 +2349,12 @@ class Storage:
 # STANDALONE FUNCTIONS
 
 
-def new_entry(k_high, k_low):
+def new_entry(k_high, k_high_mid, k_low_mid, k_low):
     """Make a new entry to the bucket dataset and return the Dataset."""
     entry = np.zeros((), dtype=HASH_ENTRY_DTYPE)
     entry["key_high"] = k_high
+    entry["key_high_mid"] = k_high_mid
+    entry["key_low_mid"] = k_low_mid
     entry["key_low"] = k_low
     return entry
 

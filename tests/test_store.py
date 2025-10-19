@@ -31,48 +31,48 @@ async def test_sorted_unsorted_region(store):
 
 
 @pytest.mark.xfail(reason="directory_type not implemented", raises=AttributeError)
-async def test_directory_resize_and_migration(tree):
+async def test_directory_resize_and_migration(store):
     # Insert enough keys to trigger directory resize/migration per spec 3
     for i in range(1, 10001):
-        await tree.insert(E.from_str(f"dir{i}"), E(i))
-    dtype = await tree.directory_type()
+        await store.insert(E.from_str(f"dir{i}"), E(i))
+    dtype = await store.directory_type()
     assert dtype in ("attribute", "dataset")
     # If migration occurred, validate all keys are still present
     if dtype == "dataset":
         for i in range(10000):
-            result = await tree.get(E.from_str(f"dir{i}"))
+            result = await store.get(E.from_str(f"dir{i}"))
             assert len(result) == 1
             assert int(result[0]) == i
     # TODO: If migration/maintenance API is available, check atomic switch and data integrity
 
 
 @pytest.mark.xfail(reason="has_spill_pointer not implemented", raises=AttributeError)
-async def test_spill_pointer_and_large_valueset(tree):
+async def test_spill_pointer_and_large_valueset(store):
     # Insert enough values to trigger ValueSet spill (external dataset)
     key = E.from_str("spill")
     for i in range(1, 1001):
-        await tree.insert(key, E(i))
-    assert await tree.has_spill_pointer(key)
+        await store.insert(key, E(i))
+    assert await store.has_spill_pointer(key)
 
 
-async def test_cidstore_initialization(tree):
+async def test_cidstore_initialization(store):
     """Verify CIDStore initializes correctly - per spec 0."""
-    assert tree is not None
+    assert store is not None
 
 
-async def test_cidstore_insert(tree):
+async def test_cidstore_insert(store):
     """Test basic insert and lookup - per spec 0."""
-    await tree.insert(E.from_str("key"), E(123))
-    result = await tree.lookup(E.from_str("key"))
+    await store.insert(E.from_str("key"), E(123))
+    result = await store.get(E.from_str("key"))
     assert len(result) == 1
     assert int(result[0]) == 123
 
 
-async def test_cidstore_delete(tree):
+async def test_cidstore_delete(store):
     """Test deletion removes key-value pairs - per spec 7."""
-    await tree.insert(E.from_str("key"), E(123))
-    await tree.delete(E.from_str("key"))
-    result = await tree.lookup(E.from_str("key"))
+    await store.insert(E.from_str("key"), E(123))
+    await store.delete(E.from_str("key"))
+    result = await store.get(E.from_str("key"))
     assert result == []
 
 
@@ -80,15 +80,15 @@ async def test_cidstore_delete(tree):
 
 
 # 3. Multi-value key promotion (per spec 5)
-async def test_multi_value_promotion(tree):
+async def test_multi_value_promotion(store):
     """Test multi-value key handling. Per spec 5, when >2 values exist for a key,
     the system should promote to ValueSet representation. This test inserts 200 values
     and verifies all are retrievable."""
     key = E.from_str("multi")
     for i in range(1, 201):
-        await tree.insert(key, E(i))
+        await store.insert(key, E(i))
     # Verify all values are retrievable (ValueSet handles large collections)
-    result = await tree.lookup(key)
+    result = await store.get(key)
     assert 200 in [int(x) for x in result]
 
 
@@ -153,29 +153,29 @@ async def test_concurrent_insert(store):
     ],
 )
 @pytest.mark.asyncio
-async def test_insert_and_lookup(tree, key, value):
-    await tree.insert(E.from_str(key), E(value))
-    result = await tree.lookup(E.from_str(key))
+async def test_insert_and_lookup(store, key, value):
+    await store.insert(E.from_str(key), E(value))
+    result = await store.get(E.from_str(key))
     assert len(result) == 1
     # Accept either E or int/str for test compatibility
     assert int(result[0]) == value
 
 
-async def test_overwrite(tree):
-    await tree.insert(E.from_str("dup"), E(1))
-    await tree.insert(E.from_str("dup"), E(2))
-    result = await tree.lookup(E.from_str("dup"))
+async def test_overwrite(store):
+    await store.insert(E.from_str("dup"), E(1))
+    await store.insert(E.from_str("dup"), E(2))
+    result = await store.get(E.from_str("dup"))
     # Multi-value: both values should be present
     assert set(result) == {E(1), E(2)}
 
 
-async def test_delete(tree):
-    await tree.insert(E.from_str("x"), E(42))
-    result = await tree.lookup(E.from_str("x"))
+async def test_delete(store):
+    await store.insert(E.from_str("x"), E(42))
+    result = await store.get(E.from_str("x"))
     assert len(result) == 1
     assert int(result[0]) == 42
-    await tree.delete(E.from_str("x"))
-    result = await tree.lookup(E.from_str("x"))
+    await store.delete(E.from_str("x"))
+    result = await store.get(E.from_str("x"))
     assert result == []
 
 
