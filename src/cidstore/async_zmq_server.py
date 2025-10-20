@@ -19,7 +19,6 @@ import os
 import msgpack
 import zmq
 import zmq.asyncio
-import os
 
 from cidstore.keys import E
 
@@ -95,12 +94,16 @@ class AsyncZMQServer:
         # Idle timeout for ZMQ sockets in seconds.
         # If 0 (default), do not stop the server on inactivity.
         try:
-            self.zmq_idle_timeout = int(os.environ.get("CIDSTORE_ZMQ_IDLE_TIMEOUT", "0"))
+            self.zmq_idle_timeout = int(
+                os.environ.get("CIDSTORE_ZMQ_IDLE_TIMEOUT", "0")
+            )
         except Exception:
             self.zmq_idle_timeout = 0
         # Compatibility endpoint for REQ/REP-based clients (cidsem mockup)
         # Default: tcp://0.0.0.0:5555
-        self.zmq_endpoint = os.environ.get("CIDSTORE_ZMQ_ENDPOINT", "tcp://0.0.0.0:5555")
+        self.zmq_endpoint = os.environ.get(
+            "CIDSTORE_ZMQ_ENDPOINT", "tcp://0.0.0.0:5555"
+        )
 
     async def mutation_worker(self):
         """Single-writer: consumes mutations from PUSH socket and applies to store.
@@ -203,13 +206,20 @@ class AsyncZMQServer:
                     try:
                         # Convert from dict format to tuple format: (subject, predicate, object)
                         triple_list = [
-                            (self._parse_cid(t.get("s")), 
-                             self._parse_cid(t.get("p")),
-                             self._parse_cid(t.get("o")))
+                            (
+                                self._parse_cid(t.get("s")),
+                                self._parse_cid(t.get("p")),
+                                self._parse_cid(t.get("o")),
+                            )
                             for t in triples
                         ]
-                        result = await self.store.insert_triples_batch(triple_list, atomic=False)
-                        resp = with_version({"status": "ok", "inserted": result.get("inserted", 0)})
+                        result = await self.store.insert_triples_batch(
+                            triple_list, atomic=False
+                        )
+                        resp = with_version({
+                            "status": "ok",
+                            "inserted": result.get("inserted", 0),
+                        })
                     except Exception as ex:
                         logger.error(f"[ZMQ] batch_insert error: {ex}")
                         resp = error_response(500, str(ex))
@@ -372,20 +382,22 @@ if __name__ == "__main__":
     async def main():
         # Create a real CIDStore instance for the ZMQ server
         from cidstore.storage import Storage
-        from cidstore.wal import WAL
         from cidstore.store import CIDStore
-        
+        from cidstore.wal import WAL
+
         # Use HDF5 path from environment or default to Docker path
         hdf5_path = os.environ.get("CIDSTORE_HDF5_PATH", "/data/cidstore.h5")
-        
+
         logger.info(f"[ZMQ] Initializing CIDStore with HDF5 path: {hdf5_path}")
-        
+
         storage = Storage(hdf5_path)
         wal = WAL(None)  # In-memory WAL for simplicity
-        store = CIDStore(storage, wal, testing=True)  # Use testing=True to disable background maintenance
-        
+        store = CIDStore(
+            storage, wal, testing=True
+        )  # Use testing=True to disable background maintenance
+
         logger.info("[ZMQ] CIDStore initialized, starting ZMQ server")
-        
+
         server = AsyncZMQServer(store)
         await server.start()
 

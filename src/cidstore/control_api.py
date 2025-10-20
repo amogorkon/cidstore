@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
 import asyncio
 import logging
 import os
+
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 
 from .auth import internal_only, jwt_required
 
@@ -26,33 +27,35 @@ app = FastAPI(title="CIDStore Control Plane", docs_url="/docs", redoc_url=None)
 async def startup_event():
     """Initialize CIDStore and start ZMQ workers on startup."""
     global store, zmq_server, zmq_task
-    
+
     logger.info("[Control Plane] Starting CIDStore initialization...")
-    
+
     try:
         # Import here to avoid circular dependencies
-        from .storage import Storage
-        from .wal import WAL
-        from .store import CIDStore
         from .async_zmq_server import AsyncZMQServer
-        
+        from .storage import Storage
+        from .store import CIDStore
+        from .wal import WAL
+
         # Get HDF5 path from environment
         hdf5_path = os.environ.get("CIDSTORE_HDF5_PATH", "/data/cidstore.h5")
         logger.info(f"[Control Plane] Using HDF5 path: {hdf5_path}")
-        
+
         # Create CIDStore instance (control plane owns it)
         storage = Storage(hdf5_path)
         wal = WAL(None)  # In-memory WAL
-        store = CIDStore(storage, wal, testing=True)  # testing=True disables background maintenance
-        
+        store = CIDStore(
+            storage, wal, testing=True
+        )  # testing=True disables background maintenance
+
         logger.info("[Control Plane] CIDStore initialized successfully")
-        
+
         # Create and start ZMQ server (data plane worker)
         zmq_server = AsyncZMQServer(store)
         zmq_task = asyncio.create_task(zmq_server.start())
-        
+
         logger.info("[Control Plane] ZMQ workers started successfully")
-        
+
     except Exception as ex:
         logger.error(f"[Control Plane] Startup failed: {ex}", exc_info=True)
         raise
@@ -62,9 +65,9 @@ async def startup_event():
 async def shutdown_event():
     """Stop ZMQ workers and close CIDStore on shutdown."""
     global store, zmq_server, zmq_task
-    
+
     logger.info("[Control Plane] Shutting down...")
-    
+
     # Stop ZMQ server
     if zmq_server:
         try:
@@ -72,7 +75,7 @@ async def shutdown_event():
             logger.info("[Control Plane] ZMQ server stopped")
         except Exception as ex:
             logger.error(f"[Control Plane] Error stopping ZMQ server: {ex}")
-    
+
     # Cancel ZMQ task
     if zmq_task:
         zmq_task.cancel()
@@ -80,7 +83,7 @@ async def shutdown_event():
             await zmq_task
         except asyncio.CancelledError:
             pass
-    
+
     # Close CIDStore
     if store:
         try:
@@ -88,7 +91,7 @@ async def shutdown_event():
             logger.info("[Control Plane] CIDStore closed")
         except Exception as ex:
             logger.error(f"[Control Plane] Error closing CIDStore: {ex}")
-    
+
     logger.info("[Control Plane] Shutdown complete")
 
 
