@@ -211,25 +211,25 @@ def query_triple_zmq(
 
 def main():
     """Main test execution."""
-    print("=" * 70)
-    print("CIDSem Mockup Test - CIDStore System Validation")
-    print("=" * 70)
-    print("Configuration:")
-    print(f"  Seed: {SEED}")
-    print(f"  Number of triples: {NUM_TRIPLES:,}")
-    print(f"  Batch size: {BATCH_SIZE:,}")
-    print(f"  CIDStore URL: {CIDSTORE_URL}")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("CIDSem Mockup Test - CIDStore System Validation", flush=True)
+    print("=" * 70, flush=True)
+    print("Configuration:", flush=True)
+    print(f"  Seed: {SEED}", flush=True)
+    print(f"  Number of triples: {NUM_TRIPLES:,}", flush=True)
+    print(f"  Batch size: {BATCH_SIZE:,}", flush=True)
+    print(f"  CIDStore URL: {CIDSTORE_URL}", flush=True)
+    print("=" * 70, flush=True)
 
     # Step 1: Wait for CIDStore (REST health check)
     if not wait_for_cidstore():
-        print("\n✗ FAILED: CIDStore not available")
+        print("\n✗ FAILED: CIDStore not available", flush=True)
         sys.exit(1)
 
     # Connect ZMQ socket for data operations
-    print(f"\nConnecting to ZMQ endpoint: {CIDSTORE_ZMQ_ENDPOINT}")
+    print(f"\nConnecting to ZMQ endpoint: {CIDSTORE_ZMQ_ENDPOINT}", flush=True)
     socket = create_zmq_socket()
-    print("✓ ZMQ socket connected")
+    print("✓ ZMQ socket connected", flush=True)
 
     # Step 2: Generate triples
     print(f"\n[1/4] Generating {NUM_TRIPLES:,} deterministic triples...")

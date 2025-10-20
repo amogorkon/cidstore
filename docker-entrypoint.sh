@@ -1,20 +1,13 @@
 #!/bin/bash
 set -e
 
-# Start REST API server in background
-echo "Starting REST API server on port 8000..."
-uvicorn src.cidstore.control_api:app --host 0.0.0.0 --port 8000 &
-REST_PID=$!
+# Start the REST API control plane server, which owns the CIDStore instance
+# and spawns ZMQ workers as background tasks. This ensures:
+# - Single HDF5 writer (REST API owns the file)
+# - Proper control/data plane separation
+# - Health checks can monitor both REST and ZMQ workers
 
-# Start ZMQ server in background
-echo "Starting ZMQ server on ports 5557-5559..."
-python -m src.cidstore.async_zmq_server &
-ZMQ_PID=$!
-
-# Wait for either process to exit
-wait -n
-
-# If one exits, kill the other
-kill $REST_PID $ZMQ_PID 2>/dev/null
+echo "Starting CIDStore control plane (REST API + ZMQ workers)..."
+uvicorn src.cidstore.control_api:app --host 0.0.0.0 --port 8000
 
 exit $?

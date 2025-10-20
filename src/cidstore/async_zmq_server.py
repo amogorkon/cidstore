@@ -14,10 +14,14 @@ See: docs/spec 2 - Data Types and Structure.md for message schema
 
 import asyncio
 import logging
+import os
 
 import msgpack
 import zmq
 import zmq.asyncio
+import os
+
+from cidstore.keys import E
 
 # Placeholder import for AsyncCIDStore
 # from src.cidstore.store import AsyncCIDStore
@@ -88,16 +92,36 @@ class AsyncZMQServer:
         self.store = store
         self.ctx = zmq.asyncio.Context.instance()
         self.running = False
+        # Idle timeout for ZMQ sockets in seconds.
+        # If 0 (default), do not stop the server on inactivity.
+        try:
+            self.zmq_idle_timeout = int(os.environ.get("CIDSTORE_ZMQ_IDLE_TIMEOUT", "0"))
+        except Exception:
+            self.zmq_idle_timeout = 0
+        # Compatibility endpoint for REQ/REP-based clients (cidsem mockup)
+        # Default: tcp://0.0.0.0:5555
+        self.zmq_endpoint = os.environ.get("CIDSTORE_ZMQ_ENDPOINT", "tcp://0.0.0.0:5555")
 
     async def mutation_worker(self):
-        """Single-writer: consumes mutations from PUSH socket and applies to store. Stops after 2s inactivity."""
+        """Single-writer: consumes mutations from PUSH socket and applies to store.
+        If `CIDSTORE_ZMQ_IDLE_TIMEOUT` is > 0, the worker will stop after that
+        many seconds of inactivity. If 0 (default), the worker will not stop
+        automatically."""
         pull_sock = self.ctx.socket(zmq.PULL)
         pull_sock.bind(PUSH_PULL_ADDR)
         while self.running:
             try:
-                msg = await asyncio.wait_for(pull_sock.recv(), timeout=2)
+                if self.zmq_idle_timeout and self.zmq_idle_timeout > 0:
+                    msg = await asyncio.wait_for(
+                        pull_sock.recv(), timeout=self.zmq_idle_timeout
+                    )
+                else:
+                    # No timeout configured: wait indefinitely
+                    msg = await pull_sock.recv()
             except asyncio.TimeoutError:
-                print("[ZMQ] No mutation received for 2s, stopping server.")
+                logger.info(
+                    f"[ZMQ] No mutation received for {self.zmq_idle_timeout}s, stopping server."
+                )
                 self.running = False
                 break
             try:
@@ -154,17 +178,90 @@ class AsyncZMQServer:
                 logger.error(f"[ZMQ] Error processing mutation: {ex}")
                 # Optionally send error response
 
+    async def compat_worker(self):
+        """Compatibility worker for REQ/REP clients.
+
+        Many simple test clients (including the CIDSem mockup) use a REQ
+        socket to a single endpoint. This worker binds a REP socket to
+        `CIDSTORE_ZMQ_ENDPOINT` and handles common commands such as
+        `batch_insert`, `insert`, and `query`.
+        """
+        rep_sock = self.ctx.socket(zmq.REP)
+        rep_sock.bind(self.zmq_endpoint)
+        while self.running:
+            try:
+                msg = await rep_sock.recv()
+            except Exception as ex:
+                logger.error(f"[ZMQ] compat_worker recv error: {ex}")
+                break
+            try:
+                req = msgpack.unpackb(msg, raw=False)
+                cmd = req.get("command") or req.get("op_code")
+                if cmd in ("batch_insert", "BATCH_INSERT"):
+                    triples = req.get("triples", [])
+                    # Use CIDStore.insert_triples_batch for efficient bulk insertion
+                    try:
+                        # Convert from dict format to tuple format: (subject, predicate, object)
+                        triple_list = [
+                            (self._parse_cid(t.get("s")), 
+                             self._parse_cid(t.get("p")),
+                             self._parse_cid(t.get("o")))
+                            for t in triples
+                        ]
+                        result = await self.store.insert_triples_batch(triple_list, atomic=False)
+                        resp = with_version({"status": "ok", "inserted": result.get("inserted", 0)})
+                    except Exception as ex:
+                        logger.error(f"[ZMQ] batch_insert error: {ex}")
+                        resp = error_response(500, str(ex))
+                elif cmd in ("insert", "INSERT"):
+                    # Single insert: expect s,p,o
+                    try:
+                        key = self._parse_cid(req.get("s") or req.get("key"))
+                        value = self._parse_cid(req.get("o") or req.get("value"))
+                        await self.store.insert(key, value)
+                        resp = with_version({"status": "ok"})
+                    except Exception as ex:
+                        resp = error_response(500, str(ex))
+                elif cmd in ("query", "LOOKUP"):
+                    try:
+                        key = self._parse_cid(req.get("s") or req.get("key"))
+                        # Use store.lookup or store.query as available
+                        if hasattr(self.store, "lookup"):
+                            results = await self.store.lookup(key)
+                            resp = with_version({"results": results})
+                        else:
+                            resp = error_response(501, "lookup not implemented")
+                    except Exception as ex:
+                        resp = error_response(500, str(ex))
+                else:
+                    resp = error_response(400, f"Unknown command: {cmd}")
+            except Exception as ex:
+                resp = error_response(500, str(ex))
+
+            try:
+                await rep_sock.send(msgpack.packb(resp, use_bin_type=True))
+            except Exception as ex:
+                logger.error(f"[ZMQ] compat_worker send error: {ex}")
+
     async def read_worker(self):
-        """Handles concurrent read requests via ROUTER/DEALER. Stops after 2s inactivity."""
+        """Handles concurrent read requests via ROUTER/DEALER.
+        If `CIDSTORE_ZMQ_IDLE_TIMEOUT` is > 0, the worker will stop after that
+        many seconds of inactivity. If 0 (default), the worker will not stop
+        automatically."""
         router_sock = self.ctx.socket(zmq.ROUTER)
         router_sock.bind(ROUTER_DEALER_ADDR)
         while self.running:
             try:
-                ident, empty, msg = await asyncio.wait_for(
-                    router_sock.recv_multipart(), timeout=2
-                )
+                if self.zmq_idle_timeout and self.zmq_idle_timeout > 0:
+                    ident, empty, msg = await asyncio.wait_for(
+                        router_sock.recv_multipart(), timeout=self.zmq_idle_timeout
+                    )
+                else:
+                    ident, empty, msg = await router_sock.recv_multipart()
             except asyncio.TimeoutError:
-                print("[ZMQ] No read received for 2s, stopping server.")
+                logger.info(
+                    f"[ZMQ] No read received for {self.zmq_idle_timeout}s, stopping server."
+                )
                 self.running = False
                 break
             try:
@@ -192,11 +289,27 @@ class AsyncZMQServer:
             ])
 
     def _parse_cid(self, cid):
-        """Convert a CID from list or tuple to tuple of two ints, or None."""
+        """Convert a CID from string/list/tuple to E instance, or None."""
         if cid is None:
             return None
+        # Handle string format like "E(12345,67890)"
+        if isinstance(cid, str):
+            if cid.startswith("E(") and cid.endswith(")"):
+                # Extract the numbers from "E(high,low)"
+                inner = cid[2:-1]  # Remove "E(" and ")"
+                parts = inner.split(",")
+                if len(parts) == 2:
+                    high = int(parts[0])
+                    low = int(parts[1])
+                    return E([high, low])  # E constructor handles [high, low] format
+                else:
+                    raise ValueError(f"Invalid CID format (expected 2 parts): {cid}")
+            else:
+                # Try to parse as a JACK hash string
+                return E(cid)
+        # Handle list/tuple format
         if isinstance(cid, (list, tuple)) and len(cid) == 2:
-            return (int(cid[0]), int(cid[1]))
+            return E([int(cid[0]), int(cid[1])])
         raise ValueError(f"Invalid CID format: {cid}")
 
     async def _publish_notification(self, event, *args):
@@ -223,14 +336,21 @@ class AsyncZMQServer:
 
     async def start(self):
         self.running = True
+        # Always start core worker tasks
         self._tasks = [
             asyncio.create_task(self.mutation_worker()),
             asyncio.create_task(self.read_worker()),
+            asyncio.create_task(self.compat_worker()),
             asyncio.create_task(self.notification_worker()),
-            asyncio.create_task(self.wal_checkpoint_worker()),
-            asyncio.create_task(self.compaction_worker()),
-            asyncio.create_task(self.metrics_worker()),
         ]
+        # Only start maintenance workers if not in testing/debugging mode
+        # CIDStore stores the testing flag as 'debugging'
+        if not getattr(self.store, "debugging", False):
+            self._tasks.extend([
+                asyncio.create_task(self.wal_checkpoint_worker()),
+                asyncio.create_task(self.compaction_worker()),
+                asyncio.create_task(self.metrics_worker()),
+            ])
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:
@@ -250,8 +370,22 @@ class AsyncZMQServer:
 if __name__ == "__main__":
 
     async def main():
-        # store = AsyncCIDStore(...)
-        store = None  # Replace with actual store
+        # Create a real CIDStore instance for the ZMQ server
+        from cidstore.storage import Storage
+        from cidstore.wal import WAL
+        from cidstore.store import CIDStore
+        
+        # Use HDF5 path from environment or default to Docker path
+        hdf5_path = os.environ.get("CIDSTORE_HDF5_PATH", "/data/cidstore.h5")
+        
+        logger.info(f"[ZMQ] Initializing CIDStore with HDF5 path: {hdf5_path}")
+        
+        storage = Storage(hdf5_path)
+        wal = WAL(None)  # In-memory WAL for simplicity
+        store = CIDStore(storage, wal, testing=True)  # Use testing=True to disable background maintenance
+        
+        logger.info("[ZMQ] CIDStore initialized, starting ZMQ server")
+        
         server = AsyncZMQServer(store)
         await server.start()
 

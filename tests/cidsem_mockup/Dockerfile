@@ -11,5 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY cidsem_test.py .
 COPY config.py .
 
+# Ensure unbuffered output for immediate logging
+ENV PYTHONUNBUFFERED=1
+
 # Run the test
-CMD ["python", "cidsem_test.py"]
+CMD ["python", "-u", "cidsem_test.py"]

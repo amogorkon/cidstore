@@ -41,6 +41,7 @@ services:
     environment:
       - CIDSTORE_URL=http://cidstore:8000
       - CIDSTORE_ZMQ_ENDPOINT=tcp://cidstore:5555
+      - PYTHONUNBUFFERED=1
     networks:
       - cidstore-network
 
