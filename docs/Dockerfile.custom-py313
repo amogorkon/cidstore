@@ -1,0 +1,118 @@
+# Multi-stage Dockerfile that builds a custom CPython 3.13 and installs cidstore
+#
+# Usage:
+# 1) Copy this file to the cidsem repo as `Dockerfile.cidstore` (or reference via build context)
+# 2) Build locally:
+#    docker build \
+#      --build-arg CPYTHON_VERSION=3.13.10 \
+#      --build-arg CIDSTORE_VERSION=main \
+#      -t ghcr.io/<ORG>/cidstore:py313-custom .
+# 3) Push to your registry (see HANDOFF doc for GitHub Actions example)
+#
+# Notes:
+# - This builds CPython from source in the builder stage and installs it into the final image.
+# - If you have a patch or tarball that enables "free-threaded"/nogil behavior, provide it via
+#   the build arg `CPYTHON_PATCH_URL` (HTTP(s) tarball). The Dockerfile will download and apply it
+#   before building CPython. You must ensure that patch is compatible with the chosen CPython version.
+
+ARG CPYTHON_VERSION=3.13.10
+ARG CIDSTORE_VERSION=main
+ARG CPYTHON_PATCH_URL=
+
+# Builder: compile CPython from source
+FROM debian:bookworm-slim AS builder
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    wget \
+    ca-certificates \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libffi-dev \
+    liblzma-dev \
+    libncursesw5-dev \
+    libgdbm-dev \
+    uuid-dev \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download CPython
+RUN set -eux; \
+  # Try to download with curl (more robust feedback); fall back to wget if curl missing
+  if command -v curl >/dev/null 2>&1; then \
+    curl -fSL "https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tgz" -o Python-${CPYTHON_VERSION}.tgz || (echo "Failed to download Python tarball" && curl -I "https://www.python.org/ftp/python/${CPYTHON_VERSION}/" || true) ; \
+  else \
+    wget -q "https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tgz" || (echo "Failed to download Python tarball with wget" && exit 1) ; \
+  fi; \
+  tar xf Python-${CPYTHON_VERSION}.tgz; \
+  rm Python-${CPYTHON_VERSION}.tgz
+
+# Optionally download and apply a patch/tarball that modifies CPython (e.g., free-threaded build)
+# The patch/tarball should be a gzipped tar with a top-level directory that can be applied with `tar -xzf`.
+ARG CPYTHON_PATCH_URL
+RUN if [ -n "${CPYTHON_PATCH_URL}" ]; then \
+      echo "Downloading CPython patch from ${CPYTHON_PATCH_URL}" && \
+      wget -q -O /tmp/patch.tar.gz "${CPYTHON_PATCH_URL}" && \
+      tar -xzf /tmp/patch.tar.gz -C . && rm /tmp/patch.tar.gz; \
+    else \
+      echo "No CPython patch provided"; \
+    fi
+
+WORKDIR /build/Python-${CPYTHON_VERSION}
+
+# Configure and build
+# NOTE: --enable-optimizations runs the PGO build (slower but faster resulting interpreter)
+RUN ./configure --prefix=/opt/python --enable-optimizations --with-lto && make -j"$(nproc)" && make install
+
+# Final image: Debian slim with built Python
+FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/amogorkon/cidstore"
+
+ENV PATH="/opt/python/bin:${PATH}"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHON_JIT=1
+ENV CIDSTORE_HDF5_PATH=/data/cidstore.h5
+
+# Install runtime deps for HDF5, curl, git
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libhdf5-dev \
+    curl \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built Python from builder
+COPY --from=builder /opt/python /opt/python
+
+# Install pip and build tooling (ensure using the built python)
+RUN /opt/python/bin/python3 -m ensurepip && /opt/python/bin/python3 -m pip install --upgrade pip setuptools wheel
+
+# Install cidstore from git (pin with CIDSTORE_VERSION arg)
+ARG CIDSTORE_VERSION=main
+RUN /opt/python/bin/python3 -m pip install "git+https://github.com/amogorkon/cidstore.git@${CIDSTORE_VERSION}"
+
+# Create data dir
+RUN mkdir -p /data && chown root:root /data
+
+# Expose REST + three dedicated ZMQ ports
+ENV CIDSTORE_PORT=8000
+ENV CIDSTORE_ZMQ_REQREP_PORT=5555
+ENV CIDSTORE_ZMQ_PUSH_PORT=5556
+ENV CIDSTORE_ZMQ_PUB_PORT=5557
+EXPOSE ${CIDSTORE_PORT} ${CIDSTORE_ZMQ_REQREP_PORT} ${CIDSTORE_ZMQ_PUSH_PORT} ${CIDSTORE_ZMQ_PUB_PORT}
+
+# Healthcheck
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+  CMD curl -f http://localhost:${CIDSTORE_PORT}/health || exit 1
+
+# Entrypoint: start uvicorn control_api
+RUN printf '#!/bin/bash\nset -e\necho "Starting CIDStore (Python %s)..."\nexec /opt/python/bin/uvicorn cidstore.control_api:app --host 0.0.0.0 --port %s\n' "${CPYTHON_VERSION}" "${CIDSTORE_PORT}" > /docker-entrypoint.sh \
+  && chmod +x /docker-entrypoint.sh
+
+VOLUME ["/data"]
+CMD ["/docker-entrypoint.sh"]

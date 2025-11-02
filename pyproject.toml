@@ -47,7 +47,8 @@ dependencies = [
     "typing-inspection>=0.4.2",
     "typing_extensions>=4.15.0",
     "uvicorn>=0.37.0",
-    "wheel>=0.45.1"
+    "wheel>=0.45.1",
+    "zvic==2025.43.0"
 ]
 
 [project.urls]
@@ -77,6 +78,7 @@ asyncio_mode = "auto"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "anyio"]
+zvic-crosshair = ["zvic[crosshair]==2025.43.0"]
 
 [project.scripts]
 cidstore-optimized = "cidstore_optimized:main"

@@ -963,3 +963,10 @@ class PredicateRegistry:
 # audit = registry.audit_ontology_discipline()
 # if audit['violations']:
 #     print(f"Ontology violations: {audit['violations']}")
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()

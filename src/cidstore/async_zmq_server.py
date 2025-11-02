@@ -25,10 +25,14 @@ from cidstore.keys import E
 # Placeholder import for AsyncCIDStore
 # from src.cidstore.store import AsyncCIDStore
 
-# ZMQ socket addresses (can be made configurable)
-PUSH_PULL_ADDR = "tcp://127.0.0.1:5557"  # For mutations
-ROUTER_DEALER_ADDR = "tcp://127.0.0.1:5558"  # For reads
-PUB_SUB_ADDR = "tcp://127.0.0.1:5559"  # For notifications (optional)
+# ZMQ socket addresses (configurable via environment variables)
+# Defaults historically used loopback for some sockets; for cross-container
+# access set env vars to bind to 0.0.0.0 (see docs/rest_api.md).
+PUSH_PULL_ADDR = os.environ.get("CIDSTORE_PUSH_PULL_ADDR", "tcp://127.0.0.1:5557")
+ROUTER_DEALER_ADDR = os.environ.get(
+    "CIDSTORE_ROUTER_DEALER_ADDR", "tcp://127.0.0.1:5558"
+)
+PUB_SUB_ADDR = os.environ.get("CIDSTORE_PUB_SUB_ADDR", "tcp://127.0.0.1:5559")
 
 
 API_VERSION = "1.0"
@@ -307,19 +311,29 @@ class AsyncZMQServer:
             if cid.startswith("E(") and cid.endswith(")"):
                 # Extract the numbers from "E(high,low)"
                 inner = cid[2:-1]  # Remove "E(" and ")"
-                parts = inner.split(",")
-                if len(parts) == 2:
+                parts = [p.strip() for p in inner.split(",")]
+                if len(parts) == 4:
+                    # 4-part SHA-256 representation
+                    a, b, c, d = map(int, parts)
+                    return E([a, b, c, d])
+                elif len(parts) == 2:
+                    # Legacy 2-part compatibility
                     high = int(parts[0])
                     low = int(parts[1])
                     return E([high, low])  # E constructor handles [high, low] format
                 else:
-                    raise ValueError(f"Invalid CID format (expected 2 parts): {cid}")
+                    raise ValueError(
+                        f"Invalid CID format (expected 2 or 4 parts): {cid}"
+                    )
             else:
                 # Try to parse as a JACK hash string
                 return E(cid)
         # Handle list/tuple format
-        if isinstance(cid, (list, tuple)) and len(cid) == 2:
-            return E([int(cid[0]), int(cid[1])])
+        if isinstance(cid, (list, tuple)):
+            if len(cid) == 4:
+                return E([int(cid[0]), int(cid[1]), int(cid[2]), int(cid[3])])
+            if len(cid) == 2:
+                return E([int(cid[0]), int(cid[1])])
         raise ValueError(f"Invalid CID format: {cid}")
 
     async def _publish_notification(self, event, *args):

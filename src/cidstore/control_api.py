@@ -197,26 +197,54 @@ async def debug_bucket(bucket_id: int, request: Request):
 
 
 @app.get("/debug/get")
-async def debug_get(high: int | None = None, low: int | None = None):
-    """Debug endpoint: return values for a key specified by `high` and `low` 64-bit parts.
+async def debug_get(
+    high: int | None = None,
+    high_mid: int | None = None,
+    low_mid: int | None = None,
+    low: int | None = None,
+):
+    """Debug endpoint: return values for a key specified by four 64-bit parts.
 
-    Example: `/debug/get?high=123&low=456`
+    Example: `/debug/get?high=1&high_mid=2&low_mid=3&low=4`
+    Legacy 2-part form `/debug/get?high=123&low=456` is still accepted and zero-extended.
     """
     global store
     if store is None:
         return PlainTextResponse("store not initialized", status_code=503)
-    if high is None or low is None:
-        return error_response(400, "Missing high or low query parameter")
+    # Initialize optional parts to avoid NameError in diagnostics
+    high_mid = high_mid
+    low_mid = low_mid
+    low = low
+
+    # Determine if 4-part components are provided
     try:
         from .keys import E
 
-        key = E((int(high), int(low)))
+        if (
+            high is not None
+            and high_mid is not None
+            and low_mid is not None
+            and low is not None
+        ):
+            key = E([int(high), int(high_mid), int(low_mid), int(low)])
+        elif high is not None and low is not None:
+            # Legacy 2-part compatibility
+            key = E((int(high), int(low)))
+        else:
+            return error_response(
+                400, "Missing key components; provide 4 parts or legacy high+low"
+            )
         results = await store.get(key)
-        # Serialize results as [[high, low], ...]
+        # Serialize results as lists of four 64-bit parts when possible
         serialized = []
         for r in results:
             try:
-                serialized.append([int(r.high), int(r.low)])
+                serialized.append([
+                    int(r.high),
+                    int(r.high_mid),
+                    int(r.low_mid),
+                    int(r.low),
+                ])
             except Exception:
                 if isinstance(r, (list, tuple)):
                     serialized.append(list(r))
@@ -231,27 +259,70 @@ async def debug_get(high: int | None = None, low: int | None = None):
 async def debug_delete(data: dict):
     """Debug endpoint to delete a key or a specific value.
 
-    Example JSON body: {"high": 100, "low": 200} or {"high":100,"low":200,"vhigh":300,"vlow":400}
+    Preferred JSON body (4-part form):
+      {"high": <int>, "high_mid": <int>, "low_mid": <int>, "low": <int>}
+    Optional value parts: `vhigh`, `vhigh_mid`, `vlow_mid`, `vlow`.
+
+    Legacy 2-part form is still accepted:
+      {"high": <int>, "low": <int>} and optionally `vhigh`/`vlow`.
     """
     global store
     if store is None:
         return PlainTextResponse("store not initialized", status_code=503)
     try:
-        high = int(data.get("high"))
-        low = int(data.get("low"))
+        # Initialize optional parts so they always exist in locals()
+        high_mid = None
+        low_mid = None
+        # Detect 4-part key
+        if all(k in data for k in ("high", "high_mid", "low_mid", "low")):
+            # Use direct key access because we've verified keys are present
+            high = int(data["high"])
+            high_mid = int(data["high_mid"])
+            low_mid = int(data["low_mid"])
+            low = int(data["low"])
+            key = None
+        else:
+            # Fallback to legacy 2-part
+            high = data.get("high")
+            low = data.get("low")
+            if high is None or low is None:
+                return error_response(400, "Missing or invalid key components")
+            high = int(high)
+            low = int(low)
+            key = None
     except Exception:
-        return error_response(400, "Missing or invalid high/low")
+        return error_response(400, "Missing or invalid key components")
     vhigh = data.get("vhigh")
+    vhigh_mid = data.get("vhigh_mid")
+    vlow_mid = data.get("vlow_mid")
     vlow = data.get("vlow")
     try:
         from .keys import E
 
-        key = E((high, low))
+        # Construct key E depending on provided parts (use already-parsed ints)
+        if high_mid is not None and low_mid is not None and low is not None:
+            key = E([high, high_mid, low_mid, low])
+        else:
+            key = E((high, low))
         # Diagnostic print of incoming types
         print(
-            "/debug/delete called with:", type(high), type(low), type(vhigh), type(vlow)
+            "/debug/delete called with:",
+            type(high),
+            type(high_mid),
+            type(low_mid),
+            type(low),
         )
-        if vhigh is not None and vlow is not None:
+        # Construct value if provided (4-part preferred)
+        if (
+            vhigh is not None
+            and vlow is not None
+            and vhigh_mid is not None
+            and vlow_mid is not None
+        ):
+            value = E([int(vhigh), int(vhigh_mid), int(vlow_mid), int(vlow)])
+            print("Calling store.delete_value with key=", key, "value=", value)
+            await store.delete_value(key, value)
+        elif vhigh is not None and vlow is not None:
             value = E((int(vhigh), int(vlow)))
             print("Calling store.delete_value with key=", key, "value=", value)
             await store.delete_value(key, value)

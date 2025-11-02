@@ -361,3 +361,10 @@ def decode_composite_value(composite: E) -> tuple[E, E]:
         return predicate, obj
     except (ValueError, TypeError) as e:
         raise ValueError(f"Failed to decode composite value: {e}") from e
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()

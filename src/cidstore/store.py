@@ -1260,6 +1260,8 @@ class CIDStore:
                         if (
                             bucket_name,
                             int(key.high),
+                            int(key.high_mid),
+                            int(key.low_mid),
                             int(key.low),
                         ) in self.hdf._mem_index:
                             break
@@ -2868,3 +2870,10 @@ class CIDStore:
     async def aclose(self) -> None:
         """Async close for compatibility with async contexts."""
         self.close()
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()

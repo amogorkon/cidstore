@@ -1,0 +1,78 @@
+# syntax=docker/dockerfile:1
+#
+# Standalone Dockerfile for CIDStore
+# This file can be copied to other repos (e.g., cidsem) to run cidstore as a service
+#
+# Usage from another repo:
+#   1. Copy this file to your repo (e.g., as 'Dockerfile.cidstore')
+#   2. Build: docker build -f Dockerfile.cidstore -t cidstore:latest .
+#   3. Run: docker run -p 8000:8000 -p 5555:5555 cidstore:latest
+#
+# Or use in docker-compose.yml:
+#   services:
+#     cidstore:
+#       build:
+#         context: .
+#         dockerfile: Dockerfile.cidstore
+#       ports:
+#         - "8000:8000"
+#         - "5555:5555"
+#
+
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# System dependencies for HDF5, NumPy, curl (for health checks)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        libhdf5-dev \
+        libssl-dev \
+        curl \
+        git \
+        && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip and build tooling
+RUN pip install --upgrade pip setuptools wheel
+
+# Install cidstore directly from GitHub
+# Option 1: Install specific version/tag
+ARG CIDSTORE_VERSION=main
+RUN pip install "git+https://github.com/amogorkon/cidstore.git@${CIDSTORE_VERSION}"
+
+# Option 2: For development, clone and install editable (comment out above, uncomment below)
+# RUN git clone --depth 1 --branch main https://github.com/amogorkon/cidstore.git /tmp/cidstore && \
+#     cd /tmp/cidstore && \
+#     pip install -e . && \
+#     cp -r /tmp/cidstore/src/cidstore /app/ && \
+#     rm -rf /tmp/cidstore
+
+# Create data directory for HDF5 storage
+RUN mkdir -p /data
+
+# Expose ports:
+# 8000: REST API for health checks and control
+# 5555: ZMQ REQ/REP (simple request-response compatibility)
+# 5556: ZMQ PUSH/PULL (mutations/writes)
+# 5557: ZMQ PUB/SUB (notifications)
+ENV CIDSTORE_PORT=8000
+ENV CIDSTORE_ZMQ_REQREP_PORT=5555
+ENV CIDSTORE_ZMQ_PUSH_PORT=5556
+ENV CIDSTORE_ZMQ_PUB_PORT=5557
+
+EXPOSE ${CIDSTORE_PORT} ${CIDSTORE_ZMQ_REQREP_PORT} ${CIDSTORE_ZMQ_PUSH_PORT} ${CIDSTORE_ZMQ_PUB_PORT}
+
+# Environment variables
+ENV PYTHON_JIT=1
+ENV CIDSTORE_HDF5_PATH=/data/cidstore.h5
+ENV PYTHONUNBUFFERED=1
+
+# Health check using REST API
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+  CMD curl -f http://localhost:${CIDSTORE_PORT}/health || exit 1
+
+# Create entrypoint script
+RUN printf '#!/bin/bash\nset -e\necho "Starting CIDStore control plane (REST API + ZMQ workers)..."\nexec python -m uvicorn cidstore.control_api:app --host 0.0.0.0 --port %s\n' "${CIDSTORE_PORT}" > /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
+
+CMD ["/docker-entrypoint.sh"]

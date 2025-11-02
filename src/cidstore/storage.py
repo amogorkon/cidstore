@@ -294,14 +294,76 @@ class Storage:
         Close the HDF5 file, flushing first. Safe to call multiple times.
         """
         # file can be None, but if not, must be File
-        assert self.file is not None, HDF5_NOT_OPEN_MSG
+        # Perform a cooperative shutdown of worker/dispatcher threads so
+        # test harnesses and short-lived processes don't hang waiting on
+        # background threads. This will attempt a graceful shutdown but
+        # tolerate failures during interpreter finalization.
         try:
+            # Signal shutdown to any waiting loops
+            try:
+                self._shutdown_event.set()
+            except Exception:
+                pass
+
+            # Enqueue sentinels for worker/dispatcher to exit if they are
+            # still running. Use non-blocking puts guarded by try/except to
+            # avoid raising during interpreter shutdown.
+            try:
+                self._worker_queue.put(None)
+            except Exception:
+                pass
+            try:
+                # Put sentinel for result dispatcher as well; worker also
+                # attempts to put a sentinel on exit but ensure here too.
+                self._result_queue.put(None)
+            except Exception:
+                pass
+
+            # Flush file contents to disk before closing
             from contextlib import suppress
 
             with suppress(Exception):
                 self.flush()
+
+            # Join worker threads with a short timeout to avoid blocking
+            # indefinitely in test environments. If join fails or threads
+            # are still alive, log a warning and continue closing resources.
+            try:
+                if getattr(self, "_worker_thread", None) is not None:
+                    self._worker_thread.join(timeout=2.0)
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_result_dispatcher_thread", None) is not None:
+                    self._result_dispatcher_thread.join(timeout=2.0)
+            except Exception:
+                pass
         except Exception:
-            # Ignore close/flush errors
+            # Best-effort: swallow any shutdown coordination errors
+            pass
+
+        # Finally close the HDF5 file if present and remove any temporary file
+        try:
+            if getattr(self, "file", None) is not None:
+                try:
+                    self.file.flush()
+                except Exception:
+                    pass
+                try:
+                    self.file.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "_tempfile_path", None) is not None:
+                try:
+                    os.unlink(str(self._tempfile_path))
+                except Exception:
+                    pass
+                self._tempfile_path = None
+        except Exception:
             pass
 
     def _worker_loop(self):
@@ -326,7 +388,15 @@ class Storage:
         self._worker_file = None
 
         while True:
-            item = self._worker_queue.get()
+            try:
+                item = self._worker_queue.get(timeout=0.5)
+            except queue.Empty:
+                # Periodically wake up to check for shutdown in case a
+                # sentinel was not delivered due to a race during finalization.
+                if self._shutdown_event.is_set():
+                    logger.info("_worker_loop: shutdown_event set, exiting")
+                    break
+                continue
             if item is None:
                 logger.info("_worker_loop: received shutdown signal")
                 break
@@ -653,7 +723,13 @@ class Storage:
         Windows proactor implementation).
         """
         while True:
-            item = self._result_queue.get()
+            try:
+                item = self._result_queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._shutdown_event.is_set():
+                    logger.info("_result_dispatcher_loop: shutdown_event set, exiting")
+                    break
+                continue
             if item is None:
                 break
             # Collect a batch (drain available items)
@@ -977,9 +1053,40 @@ class Storage:
 
             slot0, slot1 = entry["slots"]
             # Handle non-awaiting inline updates immediately
-            # Check if slots are empty by comparing to (0, 0) - not using any() since any((0,0)) is False
-            slot0_empty = slot0[0] == 0 and slot0[1] == 0
-            slot1_empty = slot1[0] == 0 and slot1[1] == 0
+            # Check if slots are empty by comparing all components to zero.
+            # Previous implementation only checked the first two components
+            # which could treat a slot with low/non-zero component as empty
+            # (e.g. (0,0,0,1)). Ensure we check all four fields.
+            try:
+                slot0_empty = (
+                    int(slot0["high"]) == 0
+                    and int(slot0.get("high_mid", 0)) == 0
+                    and int(slot0.get("low_mid", 0)) == 0
+                    and int(slot0.get("low", 0)) == 0
+                )
+            except Exception:
+                # Fallback for array-index style access
+                slot0_empty = (
+                    int(slot0[0]) == 0
+                    and int(slot0[1]) == 0
+                    and int(slot0[2]) == 0
+                    and int(slot0[3]) == 0
+                )
+
+            try:
+                slot1_empty = (
+                    int(slot1["high"]) == 0
+                    and int(slot1.get("high_mid", 0)) == 0
+                    and int(slot1.get("low_mid", 0)) == 0
+                    and int(slot1.get("low", 0)) == 0
+                )
+            except Exception:
+                slot1_empty = (
+                    int(slot1[0]) == 0
+                    and int(slot1[1]) == 0
+                    and int(slot1[2]) == 0
+                    and int(slot1[3]) == 0
+                )
             logger.info(
                 f"_apply_insert_sync: slot0={slot0} slot1={slot1} slot0_empty={slot0_empty} slot1_empty={slot1_empty}"
             )
@@ -2469,3 +2576,10 @@ def new_entry(k_high, k_high_mid, k_low_mid, k_low):
 def _get_spill_ds_name(bucket_id: int, key_high: int, key_low: int) -> str:
     """Generate the spill dataset name for a key."""
     return f"sp_{bucket_id}_{key_high}_{key_low}"
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()

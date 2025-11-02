@@ -118,3 +118,10 @@ def create_default_registry() -> PluginRegistry:
     # registry.register("fulltext", FullTextStore)
 
     return registry
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()

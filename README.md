@@ -153,6 +153,30 @@ Both scripts will create a `.venv` folder (if missing), install the package in e
 mode, install `pytest` (and minimal dev deps), and write `requirements-dev.txt` with the
 resolved package versions. After running them you can run `pytest` from the repo root.
 
+## Interface Stability with ZVIC
+
+CIDStore uses **ZVIC (Zero-Version Interface Contracts)** to ensure interface stability without relying on semantic versioning. ZVIC:
+
+- Validates contracts dynamically at runtime through signature hashing
+- Catches incompatible changes immediately (fail-fast)
+- Has **zero performance impact in production** (uses assert blocks removed with `python -O`)
+- Provides detailed compatibility diagnostics
+
+Key interfaces protected by ZVIC:
+- Plugin system (`PluginRegistry`, `SpecializedDataStructure`)
+- Storage backend (`Storage` class)
+- Write-Ahead Log (`WAL` class)
+- Main store interface (`CIDStore` class)
+- Key utilities (`E` class, composite key functions)
+
+For details, see [ZVIC Integration Documentation](docs/zvic_integration.md).
+
+To run compatibility tests:
+
+```bash
+pytest tests/test_zvic_compatibility.py -v
+```
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

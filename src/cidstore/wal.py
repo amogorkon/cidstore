@@ -460,11 +460,24 @@ class WAL:
         Python 3.13: Handles PythonFinalizationError gracefully during interpreter shutdown.
         Free-threading compatible: Safe for concurrent finalization.
         """
-        from builtins import PythonFinalizationError
+        # Python 3.13 introduces PythonFinalizationError in builtins during
+        # interpreter shutdown. Import it if available and suppress it
+        # alongside other exceptions when closing during finalization.
         from contextlib import suppress
 
-        with suppress(Exception, PythonFinalizationError):
-            self.close()
+        try:
+            from builtins import PythonFinalizationError  # type: ignore
+
+            excs = (Exception, PythonFinalizationError)
+        except Exception:
+            excs = (Exception,)
+
+        with suppress(*excs):
+            try:
+                self.close()
+            except Exception:
+                # Best-effort: swallow any errors during interpreter shutdown
+                pass
 
     def _next_hybrid_time(self):
         """
@@ -870,3 +883,10 @@ def unpack_record(rec: bytes) -> object | None:
         setattr(rec, "_wal_time", (nanos, seq, shard_id))
         setattr(rec, "wal_time", (nanos, seq, shard_id))
     return rec
+
+
+# Enable ZVIC runtime contract enforcement when assertions are on
+if __debug__:
+    from cidstore.zvic_init import enforce_contracts
+
+    enforce_contracts()
